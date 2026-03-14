@@ -9,10 +9,10 @@ import java.nio.ByteOrder
  * File format key points:
  * - "T-DB" header at offset 0x10
  * - Nodes marked by ASCII "AAAA" (0x41414141)
- * - Node type at marker+4, count/length at marker+7 (single byte)
+ * - Node header: [AAAA: 4 bytes] [type: 1 byte] [count: 3 bytes big-endian]
  * - B-tree index nodes (0xC5 uses uint16 refs, 0xC6 uses uint32 refs)
  * - 0x46 nodes reference B-tree roots for each column of a table
- * - All values are Little-Endian
+ * - Float64 data values are Little-Endian
  */
 object RealmBinaryParser {
 
@@ -24,6 +24,16 @@ object RealmBinaryParser {
                 data[0x11] == TDB_HEADER[1] &&
                 data[0x12] == TDB_HEADER[2] &&
                 data[0x13] == TDB_HEADER[3]
+    }
+
+    /**
+     * Read the 3-byte big-endian count field from a node header.
+     * Bytes at offset+5, offset+6, offset+7 form a 24-bit BE integer.
+     */
+    private fun readNodeCount(data: ByteArray, offset: Int): Int {
+        return ((data[offset + 5].toInt() and 0xFF) shl 16) or
+                ((data[offset + 6].toInt() and 0xFF) shl 8) or
+                (data[offset + 7].toInt() and 0xFF)
     }
 
     /**
@@ -62,25 +72,22 @@ object RealmBinaryParser {
         val floatNodes = mutableListOf<RealmNode.Float64Leaf>()
         val stringNodes = mutableListOf<RealmNode.StringNode>()
 
-        val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-
         for (offset in markers) {
             if (offset + 8 > data.size) continue
             val type = data[offset + 4].toInt() and 0xFF
+            val count = readNodeCount(data, offset)
 
             when (type) {
                 0x0c -> {
-                    val count = buf.getShort(offset + 5).toInt() and 0xFFFF
                     val dataOffset = offset + 8
                     if (count > 0 && dataOffset + count * 8 <= data.size) {
                         floatNodes.add(RealmNode.Float64Leaf(offset, count, dataOffset))
                     }
                 }
                 0x11 -> {
-                    val maxLength = buf.getShort(offset + 5).toInt() and 0xFFFF
                     val dataOffset = offset + 8
-                    if (dataOffset + maxLength <= data.size) {
-                        stringNodes.add(RealmNode.StringNode(offset, maxLength, dataOffset))
+                    if (count > 0 && dataOffset + count <= data.size) {
+                        stringNodes.add(RealmNode.StringNode(offset, count, dataOffset))
                     }
                 }
             }
@@ -113,12 +120,12 @@ object RealmBinaryParser {
         val floatNodeByOffset = allFloatNodes.associateBy { it.offset }
 
         // Find all 0x46 nodes (table column references)
-        val node46List = mutableListOf<Pair<Int, List<Int>>>() // offset, child offsets
+        val node46List = mutableListOf<Pair<Int, List<Int>>>()
         for (offset in markers) {
             if (offset + 8 > data.size) continue
             val type = data[offset + 4].toInt() and 0xFF
             if (type == 0x46) {
-                val count = data[offset + 7].toInt() and 0xFF
+                val count = readNodeCount(data, offset)
                 if (count in 2..20 && offset + 8 + count * 4 <= data.size) {
                     val children = mutableListOf<Int>()
                     for (i in 0 until count) {
@@ -134,30 +141,23 @@ object RealmBinaryParser {
         for ((_, children) in node46List) {
             if (children.size != 4) continue
 
-            // Try to trace each child as a B-tree root and collect leaf nodes
             val columnLeaves = mutableListOf<List<RealmNode.Float64Leaf>>()
             for (childOffset in children) {
                 val leaves = traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
                 columnLeaves.add(leaves)
             }
 
-            // The CoordinateData table should have lat and lon as the two columns
-            // with the most 0x0c leaf nodes. Find the two largest.
+            // The CoordinateData table has lat and lon as the two columns
+            // with the most 0x0c leaf nodes (equal count).
             val validColumns = columnLeaves
                 .filter { it.isNotEmpty() }
                 .sortedByDescending { it.size }
 
             if (validColumns.size >= 2 && validColumns[0].size == validColumns[1].size) {
-                // Two columns with equal number of leaves = lat and lon
-                // Determine which is lat and which is lon by checking value ranges
-                val col0FirstVal = readFloat64Values(data, validColumns[0].first()).firstOrNull { it.isFinite() } ?: 0.0
-                val col1FirstVal = readFloat64Values(data, validColumns[1].first()).firstOrNull { it.isFinite() } ?: 0.0
-
-                // The column whose first child is listed first in the 0x46 is latitude
-                // (schema order: latitude, longitude, altitude)
                 val col0Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[0]))
                 val col1Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[1]))
 
+                // Schema order: column 0 = latitude, column 1 = longitude
                 return if (col0Offset < col1Offset) {
                     Pair(validColumns[0], validColumns[1])
                 } else {
@@ -166,7 +166,7 @@ object RealmBinaryParser {
             }
         }
 
-        // Fallback: split all float nodes in half (first half = lat, second half = lon)
+        // Fallback: split all float nodes in half
         val half = allFloatNodes.size / 2
         return Pair(
             allFloatNodes.subList(0, half),
@@ -192,11 +192,11 @@ object RealmBinaryParser {
         ) return emptyList()
 
         val type = data[rootOffset + 4].toInt() and 0xFF
-        val count = data[rootOffset + 7].toInt() and 0xFF
+        val count = readNodeCount(data, rootOffset)
 
         when (type) {
             0xC5 -> {
-                // uint16 references, skip first and last (metadata)
+                // uint16 references, skip first and last (metadata sentinels)
                 if (count < 3 || rootOffset + 8 + count * 2 > data.size) return emptyList()
                 val leaves = mutableListOf<RealmNode.Float64Leaf>()
                 for (i in 1 until count - 1) {
@@ -207,17 +207,16 @@ object RealmBinaryParser {
                 return leaves
             }
             0xC6 -> {
-                // uint32 references, skip first and last (metadata)
+                // uint32 references, skip first and last (metadata sentinels)
                 if (count < 3 || rootOffset + 8 + count * 4 > data.size) return emptyList()
                 val leaves = mutableListOf<RealmNode.Float64Leaf>()
                 for (i in 1 until count - 1) {
                     val childOffset = buf.getInt(rootOffset + 8 + i * 4)
-                    // Check if child is another C6 (multi-level tree) or a leaf
                     val leaf = floatNodeByOffset[childOffset]
                     if (leaf != null) {
                         leaves.add(leaf)
                     } else {
-                        // Might be a deeper C6 node - recurse
+                        // Deeper B-tree level - recurse
                         val subLeaves = traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
                         leaves.addAll(subLeaves)
                     }
@@ -237,13 +236,12 @@ object RealmBinaryParser {
         leaves: List<RealmNode.Float64Leaf>
     ): Int {
         if (leaves.isEmpty()) return -1
-        // The root's children include the first leaf
         val firstLeafOffset = leaves.first().offset
         val markers = findAllMarkers(data)
         for (offset in markers) {
             if (offset + 8 > data.size) continue
             val type = data[offset + 4].toInt() and 0xFF
-            val count = data[offset + 7].toInt() and 0xFF
+            val count = readNodeCount(data, offset)
             when (type) {
                 0xC5 -> {
                     if (count >= 3 && offset + 8 + count * 2 <= data.size) {
@@ -319,7 +317,6 @@ object RealmBinaryParser {
         val (floatNodes, stringNodes) = parse(data)
         val markerCount = findAllMarkers(data).size
 
-        // Find lat/lon leaf nodes via B-tree tracing
         val (latLeaves, lonLeaves) = findLatLonLeafNodes(data)
 
         var totalFloats = 0
@@ -327,7 +324,6 @@ object RealmBinaryParser {
             totalFloats += node.count
         }
 
-        // Coordinate capacity is based on lat (or lon) leaf count
         val latCapacity = latLeaves.sumOf { it.count }
 
         val routeUuids = extractRouteUuids(data, stringNodes)
