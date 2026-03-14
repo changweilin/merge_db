@@ -313,6 +313,86 @@ object RealmBinaryParser {
         return uuids.distinct()
     }
 
+    /**
+     * Structural information about the CoordinateData B-Tree in a Realm .db file.
+     * Used by RealmFileExtender to perform lossless merges by appending new leaf nodes.
+     */
+    data class CoordinateBTreeInfo(
+        val node46Offset: Int,        // absolute offset of the 0x46 field-pointer node
+        val latColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lat B-Tree root
+        val lonColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lon B-Tree root
+        val latLeaves: List<RealmNode.Float64Leaf>,
+        val lonLeaves: List<RealmNode.Float64Leaf>
+    )
+
+    /**
+     * Like findLatLonLeafNodes, but also returns the 0x46 node offset and column indices
+     * so that callers can update the B-Tree root pointers in-place when extending the file.
+     */
+    fun findCoordinateBTreeInfo(data: ByteArray): CoordinateBTreeInfo? {
+        val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val markers = findAllMarkers(data)
+        val (allFloatNodes, _) = parse(data)
+        val floatNodeByOffset = allFloatNodes.associateBy { it.offset }
+
+        // Collect all 0x46 nodes with their absolute file offsets
+        val node46List = mutableListOf<Pair<Int, List<Int>>>() // (node46Offset, children)
+        for (offset in markers) {
+            if (offset + 8 > data.size) continue
+            val type = data[offset + 4].toInt() and 0xFF
+            if (type == 0x46) {
+                val count = readNodeCount(data, offset)
+                if (count in 2..20 && offset + 8 + count * 4 <= data.size) {
+                    val children = mutableListOf<Int>()
+                    for (i in 0 until count) {
+                        children.add(buf.getInt(offset + 8 + i * 4))
+                    }
+                    node46List.add(Pair(offset, children))
+                }
+            }
+        }
+
+        for ((node46Offset, children) in node46List) {
+            if (children.size != 4) continue
+
+            val columnLeaves = children.map { childOffset ->
+                traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
+            }
+
+            val validColumns = columnLeaves.filter { it.isNotEmpty() }
+                .sortedByDescending { it.size }
+            if (validColumns.size < 2 || validColumns[0].size != validColumns[1].size) continue
+
+            val root0Offset = findBTreeRoot(data, buf, validColumns[0])
+            val root1Offset = findBTreeRoot(data, buf, validColumns[1])
+            val idx0 = children.indexOf(root0Offset)
+            val idx1 = children.indexOf(root1Offset)
+            if (idx0 < 0 || idx1 < 0) continue
+
+            // Lower column index in schema = latitude
+            val latColIdx: Int
+            val lonColIdx: Int
+            val latLeaves: List<RealmNode.Float64Leaf>
+            val lonLeaves: List<RealmNode.Float64Leaf>
+            if (idx0 < idx1) {
+                latColIdx = idx0; lonColIdx = idx1
+                latLeaves = validColumns[0]; lonLeaves = validColumns[1]
+            } else {
+                latColIdx = idx1; lonColIdx = idx0
+                latLeaves = validColumns[1]; lonLeaves = validColumns[0]
+            }
+
+            return CoordinateBTreeInfo(
+                node46Offset = node46Offset,
+                latColIndexIn46 = latColIdx,
+                lonColIndexIn46 = lonColIdx,
+                latLeaves = latLeaves,
+                lonLeaves = lonLeaves
+            )
+        }
+        return null
+    }
+
     fun buildFileInfo(fileName: String, data: ByteArray): DbFileInfo {
         val (floatNodes, stringNodes) = parse(data)
         val markerCount = findAllMarkers(data).size

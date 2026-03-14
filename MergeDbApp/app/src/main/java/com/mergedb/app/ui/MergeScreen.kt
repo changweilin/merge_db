@@ -85,7 +85,10 @@ fun MergeScreen(
                         Text("來源檔: ${check.guestFileName}")
                         Text("容器容量: ${check.hostCapacity} 座標點")
                         Text("主容器已用: ${check.hostUsed} 座標點")
-                        Text("來源座標: ${check.guestUsed} 點, 可放入: ${check.guestFit} 點")
+                        Text("來源座標: ${check.guestUsed} 點 (全數合併，無資料遺失)")
+                        if (check.requiresExtension) {
+                            Text("合併模式: 延伸合併 (輸出檔案將變大)")
+                        }
                         Text("路線名稱槽位: ${check.hostNameSlots} / 總路線: ${check.totalRoutes}")
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
@@ -134,6 +137,14 @@ fun MergeScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val er = mergeState.extendResult
+                            if (er.wasExtended) {
+                                Text("合併模式: 延伸合併 (檔案已擴大)")
+                            } else {
+                                Text("合併模式: 原地合併 (檔案大小不變)")
+                            }
+                            Text("合併座標總數: ${er.totalCoordinates} 點 (新增 ${er.addedCoordinates} 點)")
                             Spacer(modifier = Modifier.height(8.dp))
                             for (detail in mergeState.validation.details) {
                                 Text(detail)
