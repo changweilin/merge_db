@@ -79,24 +79,32 @@ object MergeValidator {
             }
         }
 
-        // ── 3. Float64 finiteness check ───────────────────────────────────────
+        // ── 3. Float64 finiteness check (lat/lon nodes only) ─────────────────
+        // Altitude nodes (column 2) legitimately contain NaN in GPS Joystick
+        // files. Checking all Float64 nodes would produce false failures, so we
+        // restrict the check to the lat/lon leaf nodes identified by B-tree
+        // traversal.
+        val (latLeaves, lonLeaves) = RealmBinaryParser.findLatLonLeafNodes(mergedData)
+        val coordLeafOffsets = (latLeaves + lonLeaves).map { it.offset }.toSet()
         val (floatNodes, _) = RealmBinaryParser.parse(mergedData)
         val buf = ByteBuffer.wrap(mergedData).order(ByteOrder.LITTLE_ENDIAN)
         var nanCount = 0
         var infCount = 0
+        var checkedCount = 0
         for (node in floatNodes) {
+            if (node.offset !in coordLeafOffsets) continue   // skip altitude/other columns
+            checkedCount += node.count
             for (i in 0 until node.count) {
                 val v = buf.getDouble(node.dataOffset + i * 8)
-                if (v.isNaN())      nanCount++
+                if (v.isNaN())           nanCount++
                 else if (v.isInfinite()) infCount++
             }
         }
         val allFinite = (nanCount == 0 && infCount == 0)
         if (allFinite) {
-            val totalValues = floatNodes.sumOf { it.count }
-            details.add("OK 所有浮點數值均有效 (isFinite), 共 $totalValues 個")
+            details.add("OK 所有座標浮點數值均有效 (isFinite), 共 $checkedCount 個 (lat+lon)")
         } else {
-            details.add("FAIL 發現無效浮點數: NaN=$nanCount, Infinity=$infCount")
+            details.add("FAIL 座標中發現無效浮點數: NaN=$nanCount, Infinity=$infCount")
         }
 
         return ValidationResult(
