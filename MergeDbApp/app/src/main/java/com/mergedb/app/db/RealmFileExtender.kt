@@ -5,16 +5,20 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Performs a lossless merge of two GPS Joystick Realm .db files by extending
- * the host file rather than truncating guest data to fit existing capacity.
+ * Performs a lossless merge of two GPS Joystick Realm .db files using a
+ * two-phase "pre-allocate then merge" strategy.
  *
- * Strategy (Realm format 7, binary-level):
- *   1. Fill all existing lat/lon leaf nodes with host + gap + guest data.
- *   2. If guest data overflows the existing capacity, append new 0x0C leaf nodes
- *      at the end of the file.
- *   3. Build a new 0xC6 B-Tree root that references all leaf nodes (old + new).
- *   4. Update the two 4-byte pointers in the 0x46 field-pointer node to point
- *      to the new C6 roots — only 8 bytes are modified in the existing file body.
+ * Phase 1 – Pre-allocate (structural change only):
+ *   If the combined coordinate count exceeds the existing leaf capacity, append
+ *   empty 0x0C leaf nodes, build new 0xC6 B-Tree roots that cover all leaves
+ *   (original + new), and patch the two 4-byte pointers in the 0x46
+ *   field-pointer node.  No coordinate values are written in this phase.
+ *
+ * Phase 2 – In-place data overwrite (data change only):
+ *   Write the combined (host + gap + guest) lat/lon values sequentially into
+ *   ALL leaf nodes starting from leaf[0].  Because Phase 1 already ensured
+ *   sufficient capacity, this step is always a pure in-place operation—it
+ *   never needs to append anything.
  *
  * The output is a valid Realm format 7 file (same T-DB header, same schema,
  * 8-byte-aligned nodes) that GPS Joystick can read without any SDK migration.
@@ -39,11 +43,13 @@ object RealmFileExtender {
     )
 
     /**
-     * Merge guestData into hostData without any data loss.
+     * Merge [guestData] into [hostData] without any data loss.
      *
-     * When the combined coordinate count exceeds the host's existing leaf capacity,
-     * new leaf nodes are appended to the file and the B-Tree root pointers are updated.
-     * Otherwise the merge is performed entirely in-place (same as MergeEngine.merge).
+     * The two-phase approach keeps structural changes (node allocation) strictly
+     * separate from data changes (value overwrite):
+     *
+     *   Phase 1  preallocate()  – append empty leaf nodes + patch B-Tree pointers
+     *   Phase 2  writeToLeaves() – overwrite all leaf slots with combined values
      */
     fun extendMerge(
         hostData: ByteArray,
@@ -51,11 +57,11 @@ object RealmFileExtender {
         hostInfo: DbFileInfo,
         guestInfo: DbFileInfo
     ): ExtendResult {
-        // ── 1. Locate the B-Tree structure in the host file ──────────────────
+
+        // ── 1. Parse B-Tree structure and read all finite coordinate values ────
         val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(hostData)
             ?: error("無法解析 Host 檔案的 B-Tree 結構")
 
-        // ── 2. Read all finite coordinate values from both files ──────────────
         val hostLatValues = readFiniteValues(hostData, bTreeInfo.latLeaves)
         val hostLonValues = readFiniteValues(hostData, bTreeInfo.lonLeaves)
 
@@ -63,20 +69,21 @@ object RealmFileExtender {
         val guestLatValues = readFiniteValues(guestData, guestLatLeaves)
         val guestLonValues = readFiniteValues(guestData, guestLonLeaves)
 
-        // ── 3. Build combined arrays with 300 km gap (no truncation) ──────────
-        val combinedLat = ArrayList<Double>(hostLatValues.size + guestLatValues.size + 1)
-        val combinedLon = ArrayList<Double>(hostLonValues.size + guestLonValues.size + 1)
+        val hostPairs  = minOf(hostLatValues.size,  hostLonValues.size)
+        val guestPairs = minOf(guestLatValues.size, guestLonValues.size)
 
-        val hostPairs = minOf(hostLatValues.size, hostLonValues.size)
+        // ── 2. Build combined coordinate arrays (host + 300 km gap + guest) ───
+        val combinedLat = ArrayList<Double>(hostPairs + guestPairs + 1)
+        val combinedLon = ArrayList<Double>(hostPairs + guestPairs + 1)
+
         for (i in 0 until hostPairs) {
             combinedLat.add(hostLatValues[i])
             combinedLon.add(hostLonValues[i])
         }
-        val guestPairs = minOf(guestLatValues.size, guestLonValues.size)
         if (hostPairs > 0 && guestPairs > 0) {
-            // Insert a gap point that is >300 km away so GPS Joystick treats them
-            // as separate route segments.
-            combinedLat.add(combinedLat.last() + 3.0)  // +3° lat ≈ 333 km
+            // Gap point: +3° latitude ≈ 333 km — GPS Joystick treats the jump as
+            // a segment boundary, so host and guest appear as separate routes.
+            combinedLat.add(combinedLat.last() + 3.0)
             combinedLon.add(combinedLon.last())
         }
         for (i in 0 until guestPairs) {
@@ -85,88 +92,128 @@ object RealmFileExtender {
         }
 
         val existingCapacity = bTreeInfo.latLeaves.sumOf { it.count }
-        val totalNeeded = combinedLat.size
+        val totalNeeded      = combinedLat.size
+        val overflow         = totalNeeded - existingCapacity
 
-        // ── 4. Always write combined data into existing leaf nodes ────────────
-        val output = hostData.copyOf()
-        val outBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
-        writeToLeaves(outBuf, bTreeInfo.latLeaves, combinedLat)
-        writeToLeaves(outBuf, bTreeInfo.lonLeaves, combinedLon)
+        // ── 3. Phase 1: Pre-allocate capacity (structural change only) ────────
+        // Append empty leaf nodes and update B-Tree pointers so that the working
+        // copy has enough leaf slots for all combined coordinates.
+        // No coordinate values are written here — only the node structure is built.
+        val wasExtended = overflow > 0
+        val workingData: ByteArray
+        val activeLatLeaves: List<RealmNode.Float64Leaf>
+        val activeLonLeaves: List<RealmNode.Float64Leaf>
 
-        // Update UUIDs in the host's string node (best-effort, same as before)
-        mergeUuids(output, hostInfo, guestInfo)
-
-        // ── 5. If everything fits, return the in-place result ─────────────────
-        if (totalNeeded <= existingCapacity) {
-            return ExtendResult(
-                data = output,
-                wasExtended = false,
-                totalCoordinates = totalNeeded,
-                addedCoordinates = guestPairs
-            )
+        if (wasExtended) {
+            workingData = preallocate(hostData, bTreeInfo, overflow)
+            // Re-parse to obtain the updated leaf list (old leaves + new leaves).
+            val newBTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(workingData)
+                ?: error("預分配後無法解析 B-Tree 結構")
+            activeLatLeaves = newBTreeInfo.latLeaves
+            activeLonLeaves = newBTreeInfo.lonLeaves
+        } else {
+            workingData     = hostData.copyOf()
+            activeLatLeaves = bTreeInfo.latLeaves
+            activeLonLeaves = bTreeInfo.lonLeaves
         }
 
-        // ── 6. Extension needed: build overflow leaf nodes ────────────────────
-        val overflowLat = combinedLat.subList(existingCapacity, totalNeeded)
-        val overflowLon = combinedLon.subList(existingCapacity, totalNeeded)
+        // ── 4. Phase 2: In-place data overwrite (no structural change) ────────
+        // At this point workingData always has enough leaf capacity, so this
+        // write is always a pure sequential overwrite — no appending needed.
+        val outBuf = ByteBuffer.wrap(workingData).order(ByteOrder.LITTLE_ENDIAN)
+        writeToLeaves(outBuf, activeLatLeaves, combinedLat)
+        writeToLeaves(outBuf, activeLonLeaves, combinedLon)
+        mergeUuids(workingData, hostInfo, guestInfo)
 
-        val extension = ByteArrayOutputStream()
-        var nextOffset = hostData.size  // new nodes are appended after the original file
-
-        // New lat leaf nodes
-        val newLatOffsets = mutableListOf<Int>()
-        var vi = 0
-        while (vi < overflowLat.size) {
-            val chunk = overflowLat.subList(vi, minOf(vi + MAX_VALUES_PER_LEAF, overflowLat.size))
-            newLatOffsets.add(nextOffset)
-            val node = buildLeafNode(chunk)
-            extension.write(node)
-            nextOffset += node.size
-            vi += chunk.size
-        }
-
-        // New lon leaf nodes
-        val newLonOffsets = mutableListOf<Int>()
-        vi = 0
-        while (vi < overflowLon.size) {
-            val chunk = overflowLon.subList(vi, minOf(vi + MAX_VALUES_PER_LEAF, overflowLon.size))
-            newLonOffsets.add(nextOffset)
-            val node = buildLeafNode(chunk)
-            extension.write(node)
-            nextOffset += node.size
-            vi += chunk.size
-        }
-
-        // New C6 B-Tree roots  (all old leaf offsets + new leaf offsets)
-        val allLatOffsets = bTreeInfo.latLeaves.map { it.offset } + newLatOffsets
-        val newLatC6Offset = nextOffset
-        val latC6 = buildC6Root(allLatOffsets)
-        extension.write(latC6)
-        nextOffset += latC6.size
-
-        val allLonOffsets = bTreeInfo.lonLeaves.map { it.offset } + newLonOffsets
-        val newLonC6Offset = nextOffset
-        val lonC6 = buildC6Root(allLonOffsets)
-        extension.write(lonC6)
-
-        // ── 7. Patch the 0x46 entries to point at the new C6 roots ───────────
-        // Each entry in the 0x46 data area is a 4-byte LE uint32.
-        val lat46Pos = bTreeInfo.node46Offset + 8 + bTreeInfo.latColIndexIn46 * 4
-        val lon46Pos = bTreeInfo.node46Offset + 8 + bTreeInfo.lonColIndexIn46 * 4
-        outBuf.putInt(lat46Pos, newLatC6Offset)
-        outBuf.putInt(lon46Pos, newLonC6Offset)
-
-        // ── 8. Concatenate original (patched) + extension ─────────────────────
-        val finalBytes = output + extension.toByteArray()
         return ExtendResult(
-            data = finalBytes,
-            wasExtended = true,
+            data             = workingData,
+            wasExtended      = wasExtended,
             totalCoordinates = totalNeeded,
             addedCoordinates = guestPairs
         )
     }
 
+    // ── Phase 1 helper ────────────────────────────────────────────────────────
+
+    /**
+     * Append [overflowCount] empty lat and lon leaf nodes to [hostData], build
+     * new 0xC6 B-Tree roots that cover both the original and new leaf nodes,
+     * then patch the two 4-byte entries in the 0x46 field-pointer node.
+     *
+     * All new leaf slots are initialised to 0.0 — they will be overwritten by
+     * [writeToLeaves] immediately after this function returns.
+     *
+     * Returns a new byte array that is a structurally valid Realm file whose
+     * lat/lon leaf capacity is exactly [overflowCount] slots larger than the
+     * original.
+     */
+    private fun preallocate(
+        hostData: ByteArray,
+        bTreeInfo: RealmBinaryParser.CoordinateBTreeInfo,
+        overflowCount: Int
+    ): ByteArray {
+        val extension  = ByteArrayOutputStream()
+        var nextOffset = hostData.size   // new nodes are appended after the original body
+
+        // Empty lat leaf nodes
+        val newLatOffsets = mutableListOf<Int>()
+        var remaining = overflowCount
+        while (remaining > 0) {
+            val chunk = minOf(remaining, MAX_VALUES_PER_LEAF)
+            newLatOffsets.add(nextOffset)
+            val node = buildEmptyLeafNode(chunk)
+            extension.write(node)
+            nextOffset += node.size
+            remaining  -= chunk
+        }
+
+        // Empty lon leaf nodes
+        val newLonOffsets = mutableListOf<Int>()
+        remaining = overflowCount
+        while (remaining > 0) {
+            val chunk = minOf(remaining, MAX_VALUES_PER_LEAF)
+            newLonOffsets.add(nextOffset)
+            val node = buildEmptyLeafNode(chunk)
+            extension.write(node)
+            nextOffset += node.size
+            remaining  -= chunk
+        }
+
+        // New C6 B-Tree roots (original leaf refs + new leaf refs, in order)
+        val allLatOffsets  = bTreeInfo.latLeaves.map { it.offset } + newLatOffsets
+        val newLatC6Offset = nextOffset
+        val latC6 = buildC6Root(allLatOffsets)
+        extension.write(latC6)
+        nextOffset += latC6.size
+
+        val allLonOffsets  = bTreeInfo.lonLeaves.map { it.offset } + newLonOffsets
+        val newLonC6Offset = nextOffset
+        val lonC6 = buildC6Root(allLonOffsets)
+        extension.write(lonC6)
+
+        // Patch the 0x46 child-pointer entries to point at the new C6 roots
+        val output   = hostData.copyOf()
+        val patchBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+        patchBuf.putInt(
+            bTreeInfo.node46Offset + 8 + bTreeInfo.latColIndexIn46 * 4,
+            newLatC6Offset
+        )
+        patchBuf.putInt(
+            bTreeInfo.node46Offset + 8 + bTreeInfo.lonColIndexIn46 * 4,
+            newLonC6Offset
+        )
+
+        return output + extension.toByteArray()
+    }
+
     // ── Node builders ─────────────────────────────────────────────────────────
+
+    /**
+     * Build an empty 0x0C leaf node with [count] slots initialised to 0.0.
+     * Used by [preallocate] to create placeholder nodes before data is written.
+     */
+    private fun buildEmptyLeafNode(count: Int): ByteArray =
+        buildLeafNode(List(count) { 0.0 })
 
     /**
      * Build a 0x0C Float64 leaf node for [values], padded to an 8-byte boundary.
@@ -175,11 +222,11 @@ object RealmFileExtender {
      *   [AAAA] [0x0C] [count: 3-byte BE] [count × 8-byte LE Float64] [0x00 padding]
      */
     private fun buildLeafNode(values: List<Double>): ByteArray {
-        val count = values.size
-        val rawSize = 8 + count * 8
+        val count       = values.size
+        val rawSize     = 8 + count * 8
         val alignedSize = alignUp8(rawSize)
         val bytes = ByteArray(alignedSize)
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val buf   = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         writeNodeHeader(bytes, 0x0C, count)
         for (i in values.indices) {
             buf.putDouble(8 + i * 8, values[i])
@@ -198,11 +245,11 @@ object RealmFileExtender {
      * count = leafOffsets.size + 2  (includes both sentinels)
      */
     private fun buildC6Root(leafOffsets: List<Int>): ByteArray {
-        val count = leafOffsets.size + 2
-        val rawSize = 8 + count * 4
+        val count       = leafOffsets.size + 2
+        val rawSize     = 8 + count * 4
         val alignedSize = alignUp8(rawSize)
         val bytes = ByteArray(alignedSize)
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val buf   = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         writeNodeHeader(bytes, 0xC6, count)
         buf.putInt(8, SENTINEL_START)
         for (i in leafOffsets.indices) {
@@ -222,7 +269,7 @@ object RealmFileExtender {
     }
 
     /** Round [n] up to the nearest multiple of 8. */
-    private fun alignUp8(n: Int): Int = (n + 7) and -8  // equivalent to ((n+7)/8)*8
+    private fun alignUp8(n: Int): Int = (n + 7) and -8
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -250,9 +297,9 @@ object RealmFileExtender {
         for (leaf in leaves) {
             for (j in 0 until leaf.count) {
                 val v = when {
-                    idx < values.size     -> values[idx++]
-                    values.isNotEmpty()   -> values.last()
-                    else                  -> 0.0
+                    idx < values.size   -> values[idx++]
+                    values.isNotEmpty() -> values.last()
+                    else                -> 0.0
                 }
                 buf.putDouble(leaf.dataOffset + j * 8, v)
             }
@@ -262,8 +309,7 @@ object RealmFileExtender {
     /**
      * Merge route UUIDs from host + guest into the host's largest UUID string node.
      * Excess UUIDs that don't fit in the fixed-size node are silently dropped
-     * (same behaviour as MergeEngine.merge — the routes are still visible via the
-     * 300 km gap segmentation).
+     * (the routes are still visible via the 300 km gap segmentation).
      */
     private fun mergeUuids(output: ByteArray, hostInfo: DbFileInfo, guestInfo: DbFileInfo) {
         val combinedUuids = hostInfo.routeUuids + guestInfo.routeUuids
