@@ -9,7 +9,7 @@ sealed class RealmNode(val offset: Int, val type: Byte) {
 
     /**
      * Type 0x0c: Float64 leaf node containing coordinate data.
-     * Header: AAAA [type=0x0c] [count: uint16 LE] [padding: 1 byte]
+     * Header: AAAA [type=0x0c] [count: 3-byte Big-Endian]  (total = 8 bytes)
      * Data starts at offset + 8, each entry is 8 bytes (Float64 LE).
      */
     class Float64Leaf(
@@ -20,7 +20,7 @@ sealed class RealmNode(val offset: Int, val type: Byte) {
 
     /**
      * Type 0x11: String node containing route names, UUIDs, URLs, etc.
-     * Header: AAAA [type=0x11] [maxLength: uint16 LE] [padding: 1 byte]
+     * Header: AAAA [type=0x11] [maxLength: 3-byte Big-Endian]  (total = 8 bytes)
      * String data starts at offset + 8.
      */
     class StringNode(

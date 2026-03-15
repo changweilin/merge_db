@@ -17,6 +17,7 @@ sealed class MergeState {
     data object Merging : MergeState()
     data class Success(
         val validation: MergeValidator.ValidationResult,
+        val extendResult: RealmFileExtender.ExtendResult,
         val outputUri: Uri? = null
     ) : MergeState()
     data class Error(val message: String) : MergeState()
@@ -36,7 +37,6 @@ class MainViewModel : ViewModel() {
     private val _mergeCheck = MutableStateFlow<MergeEngine.MergeCheck?>(null)
     val mergeCheck: StateFlow<MergeEngine.MergeCheck?> = _mergeCheck
 
-    // Raw file data kept in memory for merge operation
     private var fileAData: ByteArray? = null
     private var fileBData: ByteArray? = null
 
@@ -55,17 +55,10 @@ class MainViewModel : ViewModel() {
                 val info = RealmBinaryParser.buildFileInfo(fileName, data)
 
                 when (slot) {
-                    0 -> {
-                        fileAData = data
-                        _fileAInfo.value = info
-                    }
-                    1 -> {
-                        fileBData = data
-                        _fileBInfo.value = info
-                    }
+                    0 -> { fileAData = data; _fileAInfo.value = info }
+                    1 -> { fileBData = data; _fileBInfo.value = info }
                 }
 
-                // Update merge check if both files loaded
                 val a = _fileAInfo.value
                 val b = _fileBInfo.value
                 val dA = fileAData
@@ -97,29 +90,23 @@ class MainViewModel : ViewModel() {
                 val guestInfo: DbFileInfo
 
                 if (a.fileSize >= b.fileSize) {
-                    hostData = dataA
-                    guestData = dataB
-                    hostInfo = a
-                    guestInfo = b
+                    hostData = dataA; guestData = dataB; hostInfo = a; guestInfo = b
                 } else {
-                    hostData = dataB
-                    guestData = dataA
-                    hostInfo = b
-                    guestInfo = a
+                    hostData = dataB; guestData = dataA; hostInfo = b; guestInfo = a
                 }
 
-                // Perform merge
-                val merged = MergeEngine.merge(hostData, guestData, hostInfo, guestInfo)
+                // Lossless merge — extends the file if guest data exceeds host capacity
+                val extendResult = MergeEngine.merge(hostData, guestData, hostInfo, guestInfo)
 
-                // Validate
-                val validation = MergeValidator.validate(hostData, merged)
+                // Validate merged output: structural checks + coordinate sequence integrity
+                val validation = MergeValidator.validate(hostData, extendResult.data, guestData)
 
                 // Write output
                 context.contentResolver.openOutputStream(outputUri)?.use { out ->
-                    out.write(merged)
+                    out.write(extendResult.data)
                 } ?: throw Exception("無法寫入輸出檔案")
 
-                _mergeState.value = MergeState.Success(validation, outputUri)
+                _mergeState.value = MergeState.Success(validation, extendResult, outputUri)
             } catch (e: Exception) {
                 _mergeState.value = MergeState.Error("合併失敗: ${e.message}")
             }

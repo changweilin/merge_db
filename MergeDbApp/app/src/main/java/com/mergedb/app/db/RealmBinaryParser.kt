@@ -141,27 +141,27 @@ object RealmBinaryParser {
         for ((_, children) in node46List) {
             if (children.size != 4) continue
 
-            val columnLeaves = mutableListOf<List<RealmNode.Float64Leaf>>()
-            for (childOffset in children) {
-                val leaves = traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
-                columnLeaves.add(leaves)
+            // Track which column index (position in 0x46's child list) produced
+            // each leaf set, so we don't need to reverse-look-up the root later.
+            val columnLeavesWithIdx = children.mapIndexed { i, childOffset ->
+                i to traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
             }
 
             // The CoordinateData table has lat and lon as the two columns
             // with the most 0x0c leaf nodes (equal count).
-            val validColumns = columnLeaves
-                .filter { it.isNotEmpty() }
-                .sortedByDescending { it.size }
+            val validColumns = columnLeavesWithIdx
+                .filter { it.second.isNotEmpty() }
+                .sortedByDescending { it.second.size }
 
-            if (validColumns.size >= 2 && validColumns[0].size == validColumns[1].size) {
-                val col0Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[0]))
-                val col1Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[1]))
+            if (validColumns.size >= 2 && validColumns[0].second.size == validColumns[1].second.size) {
+                val col0Idx = validColumns[0].first
+                val col1Idx = validColumns[1].first
 
                 // Schema order: column 0 = latitude, column 1 = longitude
-                return if (col0Offset < col1Offset) {
-                    Pair(validColumns[0], validColumns[1])
+                return if (col0Idx < col1Idx) {
+                    Pair(validColumns[0].second, validColumns[1].second)
                 } else {
-                    Pair(validColumns[1], validColumns[0])
+                    Pair(validColumns[1].second, validColumns[0].second)
                 }
             }
         }
@@ -227,43 +227,6 @@ object RealmBinaryParser {
         }
     }
 
-    /**
-     * Find which B-tree root offset corresponds to a given set of leaves.
-     */
-    private fun findBTreeRoot(
-        data: ByteArray,
-        buf: ByteBuffer,
-        leaves: List<RealmNode.Float64Leaf>
-    ): Int {
-        if (leaves.isEmpty()) return -1
-        val firstLeafOffset = leaves.first().offset
-        val markers = findAllMarkers(data)
-        for (offset in markers) {
-            if (offset + 8 > data.size) continue
-            val type = data[offset + 4].toInt() and 0xFF
-            val count = readNodeCount(data, offset)
-            when (type) {
-                0xC5 -> {
-                    if (count >= 3 && offset + 8 + count * 2 <= data.size) {
-                        for (i in 1 until count - 1) {
-                            val child = buf.getShort(offset + 8 + i * 2).toInt() and 0xFFFF
-                            if (child == firstLeafOffset) return offset
-                        }
-                    }
-                }
-                0xC6 -> {
-                    if (count >= 3 && offset + 8 + count * 4 <= data.size) {
-                        for (i in 1 until count - 1) {
-                            val child = buf.getInt(offset + 8 + i * 4)
-                            if (child == firstLeafOffset) return offset
-                        }
-                    }
-                }
-            }
-        }
-        return -1
-    }
-
     fun readFloat64Values(data: ByteArray, node: RealmNode.Float64Leaf): DoubleArray {
         val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val values = DoubleArray(node.count)
@@ -311,6 +274,87 @@ object RealmBinaryParser {
             }
         }
         return uuids.distinct()
+    }
+
+    /**
+     * Structural information about the CoordinateData B-Tree in a Realm .db file.
+     * Used by RealmFileExtender to perform lossless merges by appending new leaf nodes.
+     */
+    data class CoordinateBTreeInfo(
+        val node46Offset: Int,        // absolute offset of the 0x46 field-pointer node
+        val latColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lat B-Tree root
+        val lonColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lon B-Tree root
+        val latLeaves: List<RealmNode.Float64Leaf>,
+        val lonLeaves: List<RealmNode.Float64Leaf>
+    )
+
+    /**
+     * Like findLatLonLeafNodes, but also returns the 0x46 node offset and column indices
+     * so that callers can update the B-Tree root pointers in-place when extending the file.
+     */
+    fun findCoordinateBTreeInfo(data: ByteArray): CoordinateBTreeInfo? {
+        val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val markers = findAllMarkers(data)
+        val (allFloatNodes, _) = parse(data)
+        val floatNodeByOffset = allFloatNodes.associateBy { it.offset }
+
+        // Collect all 0x46 nodes with their absolute file offsets
+        val node46List = mutableListOf<Pair<Int, List<Int>>>() // (node46Offset, children)
+        for (offset in markers) {
+            if (offset + 8 > data.size) continue
+            val type = data[offset + 4].toInt() and 0xFF
+            if (type == 0x46) {
+                val count = readNodeCount(data, offset)
+                if (count in 2..20 && offset + 8 + count * 4 <= data.size) {
+                    val children = mutableListOf<Int>()
+                    for (i in 0 until count) {
+                        children.add(buf.getInt(offset + 8 + i * 4))
+                    }
+                    node46List.add(Pair(offset, children))
+                }
+            }
+        }
+
+        for ((node46Offset, children) in node46List) {
+            if (children.size != 4) continue
+
+            // Track which column index (position in 0x46's child list) produced
+            // each leaf set — avoids a reverse root-lookup that would return the
+            // wrong (stale) C6 root when the file has been pre-allocated and the
+            // 0x46 pointers have already been patched to new C6 roots.
+            val columnLeavesWithIdx = children.mapIndexed { i, childOffset ->
+                i to traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
+            }
+
+            val validColumns = columnLeavesWithIdx.filter { it.second.isNotEmpty() }
+                .sortedByDescending { it.second.size }
+            if (validColumns.size < 2 || validColumns[0].second.size != validColumns[1].second.size) continue
+
+            val idx0 = validColumns[0].first
+            val idx1 = validColumns[1].first
+
+            // Lower column index in schema = latitude
+            val latColIdx: Int
+            val lonColIdx: Int
+            val latLeaves: List<RealmNode.Float64Leaf>
+            val lonLeaves: List<RealmNode.Float64Leaf>
+            if (idx0 < idx1) {
+                latColIdx = idx0; lonColIdx = idx1
+                latLeaves = validColumns[0].second; lonLeaves = validColumns[1].second
+            } else {
+                latColIdx = idx1; lonColIdx = idx0
+                latLeaves = validColumns[1].second; lonLeaves = validColumns[0].second
+            }
+
+            return CoordinateBTreeInfo(
+                node46Offset = node46Offset,
+                latColIndexIn46 = latColIdx,
+                lonColIndexIn46 = lonColIdx,
+                latLeaves = latLeaves,
+                lonLeaves = lonLeaves
+            )
+        }
+        return null
     }
 
     fun buildFileInfo(fileName: String, data: ByteArray): DbFileInfo {
