@@ -98,8 +98,8 @@ class MainViewModel : ViewModel() {
                 // Lossless merge — extends the file if guest data exceeds host capacity
                 val extendResult = MergeEngine.merge(hostData, guestData, hostInfo, guestInfo)
 
-                // Validate merged output against original host
-                val validation = MergeValidator.validate(hostData, extendResult.data)
+                // Validate merged output: structural checks + coordinate sequence integrity
+                val validation = MergeValidator.validate(hostData, extendResult.data, guestData)
 
                 // Write output
                 context.contentResolver.openOutputStream(outputUri)?.use { out ->
