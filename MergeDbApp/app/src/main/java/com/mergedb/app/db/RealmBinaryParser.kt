@@ -141,27 +141,27 @@ object RealmBinaryParser {
         for ((_, children) in node46List) {
             if (children.size != 4) continue
 
-            val columnLeaves = mutableListOf<List<RealmNode.Float64Leaf>>()
-            for (childOffset in children) {
-                val leaves = traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
-                columnLeaves.add(leaves)
+            // Track which column index (position in 0x46's child list) produced
+            // each leaf set, so we don't need to reverse-look-up the root later.
+            val columnLeavesWithIdx = children.mapIndexed { i, childOffset ->
+                i to traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
             }
 
             // The CoordinateData table has lat and lon as the two columns
             // with the most 0x0c leaf nodes (equal count).
-            val validColumns = columnLeaves
-                .filter { it.isNotEmpty() }
-                .sortedByDescending { it.size }
+            val validColumns = columnLeavesWithIdx
+                .filter { it.second.isNotEmpty() }
+                .sortedByDescending { it.second.size }
 
-            if (validColumns.size >= 2 && validColumns[0].size == validColumns[1].size) {
-                val col0Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[0]))
-                val col1Offset = children.indexOf(findBTreeRoot(data, buf, validColumns[1]))
+            if (validColumns.size >= 2 && validColumns[0].second.size == validColumns[1].second.size) {
+                val col0Idx = validColumns[0].first
+                val col1Idx = validColumns[1].first
 
                 // Schema order: column 0 = latitude, column 1 = longitude
-                return if (col0Offset < col1Offset) {
-                    Pair(validColumns[0], validColumns[1])
+                return if (col0Idx < col1Idx) {
+                    Pair(validColumns[0].second, validColumns[1].second)
                 } else {
-                    Pair(validColumns[1], validColumns[0])
+                    Pair(validColumns[1].second, validColumns[0].second)
                 }
             }
         }
@@ -225,43 +225,6 @@ object RealmBinaryParser {
             }
             else -> return emptyList()
         }
-    }
-
-    /**
-     * Find which B-tree root offset corresponds to a given set of leaves.
-     */
-    private fun findBTreeRoot(
-        data: ByteArray,
-        buf: ByteBuffer,
-        leaves: List<RealmNode.Float64Leaf>
-    ): Int {
-        if (leaves.isEmpty()) return -1
-        val firstLeafOffset = leaves.first().offset
-        val markers = findAllMarkers(data)
-        for (offset in markers) {
-            if (offset + 8 > data.size) continue
-            val type = data[offset + 4].toInt() and 0xFF
-            val count = readNodeCount(data, offset)
-            when (type) {
-                0xC5 -> {
-                    if (count >= 3 && offset + 8 + count * 2 <= data.size) {
-                        for (i in 1 until count - 1) {
-                            val child = buf.getShort(offset + 8 + i * 2).toInt() and 0xFFFF
-                            if (child == firstLeafOffset) return offset
-                        }
-                    }
-                }
-                0xC6 -> {
-                    if (count >= 3 && offset + 8 + count * 4 <= data.size) {
-                        for (i in 1 until count - 1) {
-                            val child = buf.getInt(offset + 8 + i * 4)
-                            if (child == firstLeafOffset) return offset
-                        }
-                    }
-                }
-            }
-        }
-        return -1
     }
 
     fun readFloat64Values(data: ByteArray, node: RealmNode.Float64Leaf): DoubleArray {
@@ -355,19 +318,20 @@ object RealmBinaryParser {
         for ((node46Offset, children) in node46List) {
             if (children.size != 4) continue
 
-            val columnLeaves = children.map { childOffset ->
-                traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
+            // Track which column index (position in 0x46's child list) produced
+            // each leaf set — avoids a reverse root-lookup that would return the
+            // wrong (stale) C6 root when the file has been pre-allocated and the
+            // 0x46 pointers have already been patched to new C6 roots.
+            val columnLeavesWithIdx = children.mapIndexed { i, childOffset ->
+                i to traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
             }
 
-            val validColumns = columnLeaves.filter { it.isNotEmpty() }
-                .sortedByDescending { it.size }
-            if (validColumns.size < 2 || validColumns[0].size != validColumns[1].size) continue
+            val validColumns = columnLeavesWithIdx.filter { it.second.isNotEmpty() }
+                .sortedByDescending { it.second.size }
+            if (validColumns.size < 2 || validColumns[0].second.size != validColumns[1].second.size) continue
 
-            val root0Offset = findBTreeRoot(data, buf, validColumns[0])
-            val root1Offset = findBTreeRoot(data, buf, validColumns[1])
-            val idx0 = children.indexOf(root0Offset)
-            val idx1 = children.indexOf(root1Offset)
-            if (idx0 < 0 || idx1 < 0) continue
+            val idx0 = validColumns[0].first
+            val idx1 = validColumns[1].first
 
             // Lower column index in schema = latitude
             val latColIdx: Int
@@ -376,10 +340,10 @@ object RealmBinaryParser {
             val lonLeaves: List<RealmNode.Float64Leaf>
             if (idx0 < idx1) {
                 latColIdx = idx0; lonColIdx = idx1
-                latLeaves = validColumns[0]; lonLeaves = validColumns[1]
+                latLeaves = validColumns[0].second; lonLeaves = validColumns[1].second
             } else {
                 latColIdx = idx1; lonColIdx = idx0
-                latLeaves = validColumns[1]; lonLeaves = validColumns[0]
+                latLeaves = validColumns[1].second; lonLeaves = validColumns[0].second
             }
 
             return CoordinateBTreeInfo(
