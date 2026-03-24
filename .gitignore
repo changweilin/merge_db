@@ -1,0 +1,25 @@
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Android local config (machine-specific)
+local.properties
+
+# Generated APK / AAB
+*.apk
+*.aab
+
+# Keystore (never commit secrets)
+*.jks
+*.keystore
+
+# OS
+.DS_Store
+Thumbs.db
