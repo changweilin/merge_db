@@ -123,10 +123,10 @@ object RealmFileExtender {
         val outBuf = ByteBuffer.wrap(workingData).order(ByteOrder.LITTLE_ENDIAN)
         writeToLeaves(outBuf, activeLatLeaves, combinedLat)
         writeToLeaves(outBuf, activeLonLeaves, combinedLon)
-        mergeUuids(workingData, hostInfo, guestInfo)
+        val finalData = mergeUuids(workingData, hostInfo, guestInfo)
 
         return ExtendResult(
-            data             = workingData,
+            data             = finalData,
             wasExtended      = wasExtended,
             totalCoordinates = totalNeeded,
             addedCoordinates = guestPairs
@@ -307,28 +307,121 @@ object RealmFileExtender {
     }
 
     /**
-     * Merge route UUIDs from host + guest into the host's largest UUID string node.
-     * Excess UUIDs that don't fit in the fixed-size node are silently dropped
-     * (the routes are still visible via the 300 km gap segmentation).
+     * Merge route UUIDs from host + guest into the output.
+     *
+     * If all UUIDs fit in the host's existing 0x11 string node, they are written
+     * in-place (no size change). If the combined UUIDs exceed the node's capacity,
+     * a new larger 0x11 node is appended at the end of the file and the parent
+     * pointer is patched to reference it.
+     *
+     * Returns the (possibly extended) byte array.
      */
-    private fun mergeUuids(output: ByteArray, hostInfo: DbFileInfo, guestInfo: DbFileInfo) {
-        val combinedUuids = hostInfo.routeUuids + guestInfo.routeUuids
+    private fun mergeUuids(data: ByteArray, hostInfo: DbFileInfo, guestInfo: DbFileInfo): ByteArray {
+        val combinedUuids = (hostInfo.routeUuids + guestInfo.routeUuids).distinct()
+        if (combinedUuids.isEmpty()) return data
+
         val uuidNode = hostInfo.stringNodes
             .filter { node ->
-                val strings = RealmBinaryParser.readStrings(output, node)
+                val strings = RealmBinaryParser.readStrings(data, node)
                 strings.any { it.length == 36 && it.count { c -> c == '-' } == 4 }
             }
-            .maxByOrNull { it.maxLength } ?: return
+            .maxByOrNull { it.maxLength } ?: return data
 
-        val uuidBytes = ByteArray(uuidNode.maxLength)
-        var pos = 0
-        for (uuid in combinedUuids) {
-            val raw = uuid.toByteArray(Charsets.UTF_8)
-            if (pos + raw.size + 1 > uuidBytes.size) break
-            System.arraycopy(raw, 0, uuidBytes, pos, raw.size)
-            pos += raw.size
-            uuidBytes[pos++] = 0
+        val needed = combinedUuids.sumOf { it.length + 1 }  // each UUID + null terminator
+
+        return if (needed <= uuidNode.maxLength) {
+            // Fits in existing node: in-place overwrite
+            writeUuidBytes(data, uuidNode.dataOffset, uuidNode.maxLength, combinedUuids)
+            data
+        } else {
+            // Need a larger node: append and patch
+            extendUuidStorage(data, uuidNode, combinedUuids, needed)
         }
-        System.arraycopy(uuidBytes, 0, output, uuidNode.dataOffset, uuidBytes.size)
+    }
+
+    /** Write [uuids] as packed null-terminated strings into [data] starting at [dataOffset]. */
+    private fun writeUuidBytes(data: ByteArray, dataOffset: Int, capacity: Int, uuids: List<String>) {
+        val buf = ByteArray(capacity)
+        var pos = 0
+        for (uuid in uuids) {
+            val raw = uuid.toByteArray(Charsets.UTF_8)
+            if (pos + raw.size + 1 > buf.size) break
+            System.arraycopy(raw, 0, buf, pos, raw.size)
+            pos += raw.size
+            buf[pos++] = 0
+        }
+        System.arraycopy(buf, 0, data, dataOffset, buf.size)
+    }
+
+    /**
+     * Append a new 0x11 string node large enough for all [uuids], then patch
+     * the parent pointer that used to reference [oldNode] to point to the new node.
+     * Falls back to in-place truncation if the parent pointer cannot be located.
+     */
+    private fun extendUuidStorage(
+        data: ByteArray,
+        oldNode: RealmNode.StringNode,
+        uuids: List<String>,
+        needed: Int
+    ): ByteArray {
+        val parentRef = RealmBinaryParser.findNodeParentRef(data, oldNode.offset)
+            ?: run {
+                // Parent not found — fall back to in-place (truncated) write
+                writeUuidBytes(data, oldNode.dataOffset, oldNode.maxLength, uuids)
+                return data
+            }
+
+        // Build the new 0x11 node
+        val capacity    = needed
+        val alignedSize = alignUp8(8 + capacity)
+        val newNode     = ByteArray(alignedSize)
+        writeNodeHeader(newNode, 0x11, capacity)
+        writeUuidBytes(newNode, 8, capacity, uuids)   // data starts at offset 8 inside the node
+
+        val newNodeOffset = data.size
+        val extended      = data + newNode
+
+        val patchBuf = ByteBuffer.wrap(extended).order(ByteOrder.LITTLE_ENDIAN)
+
+        if (!parentRef.isUint16) {
+            // C6 or 0x46: direct 4-byte patch
+            patchBuf.putInt(parentRef.refByteOffset, newNodeOffset)
+            return extended
+        }
+
+        // C5 parent: uint16 can't address the new (high) offset.
+        // Replace the C5 node with a new C6 node that has the same refs but the
+        // target ref updated, then patch the C5 node's own parent.
+        val c5Offset = parentRef.parentNodeOffset
+        val c5Count  = ((extended[c5Offset + 5].toInt() and 0xFF) shl 16) or
+                       ((extended[c5Offset + 6].toInt() and 0xFF) shl 8)  or
+                        (extended[c5Offset + 7].toInt() and 0xFF)
+
+        // Read all uint16 refs from the C5 node, upgrading to uint32
+        val refs = (0 until c5Count).map { i ->
+            val ref = patchBuf.getShort(c5Offset + 8 + i * 2).toInt() and 0xFFFF
+            if (ref == oldNode.offset) newNodeOffset else ref
+        }
+
+        // Build a C6 node (no sentinels — this is a mid-tree node, not a root)
+        val c6Size  = alignUp8(8 + refs.size * 4)
+        val c6Bytes = ByteArray(c6Size)
+        writeNodeHeader(c6Bytes, 0xC6, refs.size)
+        val c6Buf = ByteBuffer.wrap(c6Bytes).order(ByteOrder.LITTLE_ENDIAN)
+        refs.forEachIndexed { i, ref -> c6Buf.putInt(8 + i * 4, ref) }
+
+        val newC6Offset  = extended.size
+        val extended2    = extended + c6Bytes
+        val patchBuf2    = ByteBuffer.wrap(extended2).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Patch the C5 node's parent to reference the new C6 node
+        val c5ParentRef = RealmBinaryParser.findNodeParentRef(extended2, c5Offset)
+        if (c5ParentRef != null && !c5ParentRef.isUint16) {
+            patchBuf2.putInt(c5ParentRef.refByteOffset, newC6Offset)
+        }
+        // If c5ParentRef is still null or also C5, this rare case is left as-is
+        // (the existing C5 keeps its old UUID ref; truncation occurs but no crash)
+
+        return extended2
     }
 }

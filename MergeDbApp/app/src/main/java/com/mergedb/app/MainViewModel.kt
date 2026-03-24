@@ -9,6 +9,7 @@ import com.mergedb.app.db.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 sealed class MergeState {
@@ -68,8 +69,10 @@ class MainViewModel : ViewModel() {
                 }
 
                 _mergeState.value = MergeState.Idle
-            } catch (e: Exception) {
-                _mergeState.value = MergeState.Error("解析失敗: ${e.message}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _mergeState.value = MergeState.Error("解析失敗: ${e::class.simpleName}: ${e.message}")
             }
         }
     }
@@ -107,8 +110,10 @@ class MainViewModel : ViewModel() {
                 } ?: throw Exception("無法寫入輸出檔案")
 
                 _mergeState.value = MergeState.Success(validation, extendResult, outputUri)
-            } catch (e: Exception) {
-                _mergeState.value = MergeState.Error("合併失敗: ${e.message}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _mergeState.value = MergeState.Error("合併失敗: ${e::class.simpleName}: ${e.message}")
             }
         }
     }

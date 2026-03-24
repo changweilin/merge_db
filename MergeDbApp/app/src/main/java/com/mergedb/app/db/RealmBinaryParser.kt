@@ -357,6 +357,51 @@ object RealmBinaryParser {
         return null
     }
 
+    data class NodeParentRef(
+        val parentNodeOffset: Int,  // absolute offset of the AAAA node that holds the ref
+        val refByteOffset: Int,     // absolute byte position of the reference value in the file
+        val isUint16: Boolean       // true = C5 (2-byte ref), false = C6/0x46 (4-byte ref)
+    )
+
+    /**
+     * Scan all B-tree nodes (C5, C6, 0x46) to find which one holds a reference
+     * to [targetOffset]. Returns the location of that reference in the file, or
+     * null if none found.
+     */
+    fun findNodeParentRef(data: ByteArray, targetOffset: Int): NodeParentRef? {
+        val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val markers = findAllMarkers(data)
+
+        for (nodeOffset in markers) {
+            if (nodeOffset + 8 > data.size) continue
+            val type = data[nodeOffset + 4].toInt() and 0xFF
+            val count = readNodeCount(data, nodeOffset)
+
+            when (type) {
+                0xC5 -> {
+                    if (targetOffset > 0xFFFF) continue  // uint16 can't address high offsets
+                    if (count < 1 || nodeOffset + 8 + count * 2 > data.size) continue
+                    for (i in 0 until count) {
+                        val refPos = nodeOffset + 8 + i * 2
+                        val ref = buf.getShort(refPos).toInt() and 0xFFFF
+                        if (ref == targetOffset)
+                            return NodeParentRef(nodeOffset, refPos, isUint16 = true)
+                    }
+                }
+                0xC6, 0x46 -> {
+                    if (count < 1 || nodeOffset + 8 + count * 4 > data.size) continue
+                    for (i in 0 until count) {
+                        val refPos = nodeOffset + 8 + i * 4
+                        val ref = buf.getInt(refPos)
+                        if (ref == targetOffset)
+                            return NodeParentRef(nodeOffset, refPos, isUint16 = false)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     fun buildFileInfo(fileName: String, data: ByteArray): DbFileInfo {
         val (floatNodes, stringNodes) = parse(data)
         val markerCount = findAllMarkers(data).size
