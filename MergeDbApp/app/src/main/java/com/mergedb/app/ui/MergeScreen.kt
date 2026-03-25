@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.mergedb.app.BuildConfig
 import com.mergedb.app.MergeState
 import com.mergedb.app.db.DbFileInfo
 import com.mergedb.app.db.MergeEngine
@@ -27,9 +28,10 @@ fun MergeScreen(
     modifier: Modifier = Modifier
 ) {
     Scaffold(
+        modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("GPS Joystick DB 合併工具") },
+                title = { Text("GPS Joystick DB 合併工具 v${BuildConfig.VERSION_NAME}") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -38,7 +40,7 @@ fun MergeScreen(
         }
     ) { padding ->
         Column(
-            modifier = modifier
+            modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(16.dp)

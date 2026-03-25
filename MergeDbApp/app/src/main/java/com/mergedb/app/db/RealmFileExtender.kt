@@ -307,6 +307,28 @@ object RealmFileExtender {
     }
 
     /**
+     * Rewrite coordinates in-place for TSP optimisation.
+     *
+     * Since TSP only reorders existing points (no new points added), the leaf
+     * capacity is always sufficient and no structural extension is needed.
+     * The function writes [newLats] / [newLons] into the existing leaf nodes
+     * exactly like Phase 2 of [extendMerge], then returns the patched bytes.
+     */
+    fun rewriteCoordinates(
+        sourceData: ByteArray,
+        newLats: List<Double>,
+        newLons: List<Double>
+    ): ByteArray {
+        val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(sourceData)
+            ?: error("無法解析 B-Tree 結構")
+        val working = sourceData.copyOf()
+        val buf = ByteBuffer.wrap(working).order(ByteOrder.LITTLE_ENDIAN)
+        writeToLeaves(buf, bTreeInfo.latLeaves, newLats)
+        writeToLeaves(buf, bTreeInfo.lonLeaves, newLons)
+        return working
+    }
+
+    /**
      * Merge route UUIDs from host + guest into the output.
      *
      * If all UUIDs fit in the host's existing 0x11 string node, they are written
