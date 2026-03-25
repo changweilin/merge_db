@@ -21,6 +21,7 @@ sealed class MergeState {
     data class Success(
         val validation: MergeValidator.ValidationResult,
         val extendResult: RealmFileExtender.ExtendResult,
+        val tspResult: TspResult? = null,
         val outputUri: Uri? = null
     ) : MergeState()
     data class Error(val message: String) : MergeState()
@@ -114,8 +115,9 @@ class MainViewModel : ViewModel() {
                 val validation = MergeValidator.validate(hostData, extendResult.data, guestData)
 
                 // Optionally apply TSP optimisation on the merged result
+                var tspResult: TspResult? = null
                 val outputData = if (_applyTspOnMerge.value) {
-                    val tspResult = TspEngine.optimizeDb(
+                    tspResult = TspEngine.optimizeDb(
                         data = extendResult.data,
                         config = TspConfig(),
                         isCancelled = { !isActive },
@@ -137,7 +139,7 @@ class MainViewModel : ViewModel() {
                     out.write(outputData)
                 } ?: throw Exception("無法寫入輸出檔案")
 
-                _mergeState.value = MergeState.Success(validation, extendResult, outputUri)
+                _mergeState.value = MergeState.Success(validation, extendResult, tspResult, outputUri)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

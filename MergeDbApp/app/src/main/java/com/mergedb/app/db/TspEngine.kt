@@ -47,43 +47,6 @@ data class TspResult(
     val skippedRoutes: Int
 )
 
-// ── Gap detection ─────────────────────────────────────────────────────────────
-
-/** Gap threshold: GPS Joystick uses +3° latitude jumps to separate route segments. */
-private const val GAP_THRESHOLD = 2.5
-
-/**
- * Split flat (lat, lon) lists into segments separated by gap points.
- * Returns a list of segments and the gap points themselves.
- */
-data class SegmentSplit(
-    val segments: List<List<LatLon>>,
-    val gapPoints: List<LatLon?>     // null = no gap before this segment (first)
-)
-
-fun splitByGap(lats: List<Double>, lons: List<Double>): SegmentSplit {
-    if (lats.isEmpty()) return SegmentSplit(emptyList(), emptyList())
-
-    val segments = mutableListOf<List<LatLon>>()
-    val gapPoints = mutableListOf<LatLon?>()
-    var current = mutableListOf<LatLon>()
-    gapPoints.add(null) // no gap before the first segment
-
-    for (i in lats.indices) {
-        val pt = LatLon(lats[i], lons[i])
-        if (current.isNotEmpty() && abs(lats[i] - current.last().lat) > GAP_THRESHOLD) {
-            // This is a gap point — end the current segment and record this gap
-            segments.add(current.toList())
-            current = mutableListOf()
-            gapPoints.add(pt) // gap point before the next segment
-        } else {
-            current.add(pt)
-        }
-    }
-    if (current.isNotEmpty()) segments.add(current.toList())
-    return SegmentSplit(segments, gapPoints)
-}
-
 // ── Core TSP object ───────────────────────────────────────────────────────────
 
 object TspEngine {
@@ -476,37 +439,38 @@ object TspEngine {
         val lons = readFinite(bTreeInfo.lonLeaves)
         val pairs = minOf(lats.size, lons.size)
 
-        val split = splitByGap(lats.take(pairs), lons.take(pairs))
-        val segments = split.segments
-        val gapPoints = split.gapPoints
-        val totalRoutes = segments.size
+        // findRouteSegments: strategy 1 = route-ID column, strategy 2 = gap fallback.
+        // Each IntRange covers positions [start, end) in the flat coordinate array.
+        // Positions not covered by any range (gap sentinel points) are left untouched.
+        val ranges = RealmBinaryParser.findRouteSegments(data)
+            ?: error("無法分析路線結構")
+        val totalRoutes = ranges.size
 
-        val outLat = ArrayList<Double>(pairs)
-        val outLon = ArrayList<Double>(pairs)
+        // Work on mutable copies; untouched positions (gap points) stay as-is.
+        val outLat = lats.take(pairs).toMutableList()
+        val outLon = lons.take(pairs).toMutableList()
         val routeResults = mutableListOf<TspRouteResult>()
         var improvedCount = 0
         var skippedCount = 0
 
-        for ((idx, seg) in segments.withIndex()) {
-            // Prepend gap point if any
-            gapPoints[idx]?.let { g -> outLat.add(g.lat); outLon.add(g.lon) }
+        for ((idx, range) in ranges.withIndex()) {
+            val n = range.last - range.first + 1   // range is start until end (exclusive)
 
-            val n = seg.size
             if (n <= 2) {
-                seg.forEach { outLat.add(it.lat); outLon.add(it.lon) }
                 routeResults.add(TspRouteResult(idx, 0.0, 0.0, false, false, "點數 ≤ 2，略過"))
                 onProgress(idx + 1, totalRoutes)
                 continue
             }
 
             if (n > config.skipLargeThreshold) {
-                seg.forEach { outLat.add(it.lat); outLon.add(it.lon) }
-                routeResults.add(TspRouteResult(idx, 0.0, 0.0, false, true, "超過 ${config.skipLargeThreshold} 點上限"))
+                routeResults.add(TspRouteResult(idx, 0.0, 0.0, false, true,
+                    "超過 ${config.skipLargeThreshold} 點上限"))
                 skippedCount++
                 onProgress(idx + 1, totalRoutes)
                 continue
             }
 
+            val seg = (range).map { LatLon(lats[it], lons[it]) }
             val dist = buildDistMatrix(seg)
             val identity = IntArray(n) { it }
             val origLen = tourLength(seg, identity, dist)
@@ -516,20 +480,29 @@ object TspEngine {
             val improvement = if (origLen > 0) (origLen - newLen) / origLen * 100 else 0.0
             val apply = improvement >= config.improvementThreshold
 
-            val reordered = if (apply) order.map { seg[it] } else seg
-            reordered.forEach { outLat.add(it.lat); outLon.add(it.lon) }
+            if (apply) {
+                // Write reordered coordinates back into the same positions in-place
+                order.forEachIndexed { i, srcIdx ->
+                    outLat[range.first + i] = seg[srcIdx].lat
+                    outLon[range.first + i] = seg[srcIdx].lon
+                }
+            }
 
-            routeResults.add(
-                TspRouteResult(
-                    index = idx,
-                    originalLength = origLen,
-                    optimizedLength = newLen,
-                    improved = apply && newLen < origLen,
-                    skipped = false,
-                    reason = if (!apply) "改善幅度 %.1f%% < 門檻 %.1f%%".format(improvement, config.improvementThreshold) else ""
-                )
-            )
-            if (apply && newLen < origLen) improvedCount++
+            val actuallyImproved = apply && newLen < origLen
+            val reason = when {
+                !apply -> "改善幅度 %.1f%% < 門檻 %.1f%%".format(improvement, config.improvementThreshold)
+                newLen >= origLen -> "優化後路徑未縮短 (%.1f%%)".format(improvement)
+                else -> ""
+            }
+            routeResults.add(TspRouteResult(
+                index = idx,
+                originalLength = origLen,
+                optimizedLength = newLen,
+                improved = actuallyImproved,
+                skipped = false,
+                reason = reason
+            ))
+            if (actuallyImproved) improvedCount++
             onProgress(idx + 1, totalRoutes)
         }
 

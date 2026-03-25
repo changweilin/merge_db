@@ -30,6 +30,7 @@ fun TspScreen(
     onExport: () -> Unit,
     onReset: () -> Unit,
     onDismissError: () -> Unit,
+    onAnalyzeStructure: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Scaffold(
@@ -77,8 +78,13 @@ fun TspScreen(
                             Spacer(Modifier.height(8.dp))
                             Text("檔案: ${state.info.fileName}")
                             Text("大小: ${state.info.fileSize / 1024} KB")
-                            Text("路線數: ${state.routeCount} 條")
+                            Text("路線數 (UUID): ${state.info.routeUuids.size}  座標段數: ${state.routeCount}")
                             Text("座標點: ${state.totalPoints} 點")
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedButton(
+                                onClick = onAnalyzeStructure,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("分析 DB 結構") }
                         }
                         is TspState.Optimizing -> {
                             Spacer(Modifier.height(8.dp))
@@ -247,6 +253,21 @@ fun TspScreen(
                 ResultCard(result = state.result)
             }
 
+            // ── DB Structure report ───────────────────────────────────────────
+            if (state is TspState.DbStructure) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("DB 結構分析", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            state.report,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+
             // ── Error ─────────────────────────────────────────────────────────
             if (state is TspState.Error) {
                 Card(
@@ -287,12 +308,11 @@ private fun ResultCard(result: TspResult) {
 
             result.routeResults.take(20).forEach { r ->
                 val status = when {
-                    r.skipped -> "略過 (${r.reason})"
+                    r.skipped -> "略過: ${r.reason}"
                     r.improved -> "改善 %.1f%%".format(
                         if (r.originalLength > 0) (r.originalLength - r.optimizedLength) / r.originalLength * 100 else 0.0
                     )
-                    r.reason.isNotEmpty() -> "未改善 (${r.reason})"
-                    else -> "未改善"
+                    else -> "未採用: ${r.reason}"
                 }
                 Text(
                     "路線 ${r.index + 1}: $status",

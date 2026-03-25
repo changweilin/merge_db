@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onReset = { tspVm.reset() },
                             onDismissError = { tspVm.dismissError() },
+                            onAnalyzeStructure = { tspVm.analyzeDbStructure() },
                             modifier = Modifier.weight(1f)
                         )
                     }

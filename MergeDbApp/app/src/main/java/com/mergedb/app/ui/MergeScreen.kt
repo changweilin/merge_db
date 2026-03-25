@@ -171,6 +171,31 @@ fun MergeScreen(
                                 Text("合併模式: 原地合併 (檔案大小不變)")
                             }
                             Text("合併座標總數: ${er.totalCoordinates} 點 (新增 ${er.addedCoordinates} 點)")
+                            mergeState.tspResult?.let { tsp ->
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "── TSP 優化結果 ──",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text("總路線: ${tsp.totalRoutes} 條  已改善: ${tsp.improvedRoutes} 條  已略過: ${tsp.skippedRoutes} 條")
+                                tsp.routeResults.take(20).forEach { r ->
+                                    val status = when {
+                                        r.skipped -> "略過: ${r.reason}"
+                                        r.improved -> "改善 ${"%.1f".format(
+                                            if (r.originalLength > 0) (r.originalLength - r.optimizedLength) / r.originalLength * 100 else 0.0
+                                        )}%"
+                                        else -> "未採用: ${r.reason}"
+                                    }
+                                    Text(
+                                        "路線 ${r.index + 1}: $status",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                if (tsp.routeResults.size > 20) {
+                                    Text("… 還有 ${tsp.routeResults.size - 20} 條", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                             for (detail in mergeState.validation.details) {
                                 Text(detail)
@@ -242,7 +267,13 @@ fun FileSelectionCard(
                 Text("AAAA 標記: ${info.markerCount}")
                 Text("Float64 節點: ${info.float64Nodes.size}")
                 Text("座標容量: ${info.coordinateCapacity} 點")
-                Text("路線數: ${info.routeUuids.size}")
+                val uuidCount = info.routeUuids.size
+                val gapCount = info.routeSegmentCount
+                val mismatch = uuidCount != gapCount
+                Text(
+                    "路線數 (UUID): $uuidCount  座標段數: $gapCount" +
+                    if (mismatch) "  ⚠ 不一致" else ""
+                )
                 if (info.routeUuids.isNotEmpty()) {
                     Text(
                         "UUID: ${info.routeUuids.first().take(16)}... 等 ${info.routeUuids.size} 條",

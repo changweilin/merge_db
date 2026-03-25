@@ -21,6 +21,7 @@ sealed class TspState {
     data class Optimizing(val current: Int, val total: Int) : TspState()
     data class Done(val result: TspResult) : TspState()
     data class Error(val message: String) : TspState()
+    data class DbStructure(val report: String) : TspState()
 }
 
 class TspViewModel : ViewModel() {
@@ -70,27 +71,22 @@ class TspViewModel : ViewModel() {
                 }
                 fileData = data
 
-                // Analyse coordinate structure
-                val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(data)
-                    ?: error("無法解析 B-Tree 結構")
-
-                fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
-                    for (leaf in leaves) {
-                        for (v in RealmBinaryParser.readFloat64Values(data, leaf)) {
-                            if (v.isFinite()) add(v)
-                        }
-                    }
-                }
-
-                val lats = readFinite(bTreeInfo.latLeaves)
-                val lons = readFinite(bTreeInfo.lonLeaves)
-                val pairs = minOf(lats.size, lons.size)
-                val split = splitByGap(lats.take(pairs), lons.take(pairs))
-
                 val info = RealmBinaryParser.buildFileInfo(fileName, data)
+                // totalPoints: count of valid finite coordinate pairs
+                val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(data)
+                val pairs = if (bTreeInfo != null) {
+                    fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
+                        for (leaf in leaves)
+                            for (v in RealmBinaryParser.readFloat64Values(data, leaf))
+                                if (v.isFinite()) add(v)
+                    }
+                    minOf(readFinite(bTreeInfo.latLeaves).size,
+                          readFinite(bTreeInfo.lonLeaves).size)
+                } else 0
+
                 _state.value = TspState.Ready(
                     info = info,
-                    routeCount = split.segments.size,
+                    routeCount = info.routeSegmentCount,
                     totalPoints = pairs
                 )
             } catch (e: CancellationException) {
@@ -157,6 +153,61 @@ class TspViewModel : ViewModel() {
 
     fun dismissError() {
         _state.value = TspState.Idle
+    }
+
+    /** Scan DB node types and table structure; result shown in DbStructure state. */
+    fun analyzeDbStructure() {
+        val data = fileData ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            val sb = StringBuilder()
+
+            // ── Segmentation strategy used ───────────────────────────────────
+            sb.appendLine("=== Route Segmentation ===")
+            val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(data)
+            if (bTreeInfo == null) {
+                sb.appendLine("ERROR: cannot parse B-Tree")
+            } else {
+                val ridLeaf = bTreeInfo.routeIdLeaves?.firstOrNull()
+                val strategy = if (ridLeaf != null)
+                    "Strategy 1: route-ID column (type=0x%02X, bpe=%d)"
+                        .format(ridLeaf.type.toInt() and 0xFF, ridLeaf.bytesPerEntry)
+                else "Strategy 2: gap fallback (no integer column found)"
+                sb.appendLine(strategy)
+                val segments = RealmBinaryParser.findRouteSegments(data)
+                sb.appendLine("Segments: ${segments?.size ?: "null"}")
+                segments?.take(10)?.forEachIndexed { i, r ->
+                    sb.appendLine("  [$i] positions ${r.first}..${r.last}  (${r.last - r.first + 1} pts)")
+                }
+                if ((segments?.size ?: 0) > 10) sb.appendLine("  … (showing first 10)")
+            }
+            sb.appendLine()
+
+            // ── Node type summary ────────────────────────────────────────────
+            sb.appendLine("=== Node Types ===")
+            val types = RealmBinaryParser.scanNodeTypes(data)
+            for (t in types) {
+                sb.appendLine(
+                    "type=0x%02X  nodes=%d  totalEntries=%d  bytesPerEntry=%d"
+                        .format(t.typeByte, t.count, t.totalEntries, t.bytesPerEntry)
+                )
+            }
+
+            // ── Table (0x46) structure ────────────────────────────────────────
+            sb.appendLine()
+            sb.appendLine("=== Tables (0x46 nodes) ===")
+            val tables = RealmBinaryParser.probeAllTables(data)
+            for (tbl in tables) {
+                sb.appendLine("Table @ 0x%X  (${tbl.columns.size} cols)".format(tbl.node46Offset))
+                for (col in tbl.columns) {
+                    val types2 = col.childTypes.joinToString(",") { "0x%02X".format(it) }
+                    sb.appendLine(
+                        "  col[${col.columnIndex}]  leaves=${col.leafCount}  entries=${col.entryCount}  leafTypes=[$types2]"
+                    )
+                }
+            }
+
+            _state.value = TspState.DbStructure(sb.toString())
+        }
     }
 
     private fun getFileName(uri: Uri, context: Context): String? {

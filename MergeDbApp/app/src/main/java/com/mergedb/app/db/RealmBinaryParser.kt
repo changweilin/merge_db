@@ -2,6 +2,37 @@ package com.mergedb.app.db
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
+
+// ── Gap-detection fallback (used when no route-ID column is found) ────────────
+
+/** Latitude jump threshold that separates route segments in the flat coord array. */
+internal const val GAP_THRESHOLD = 2.5
+
+data class SegmentSplit(
+    val segments: List<List<LatLon>>,
+    val gapPoints: List<LatLon?>   // null = no gap before this segment (first segment)
+)
+
+fun splitByGap(lats: List<Double>, lons: List<Double>): SegmentSplit {
+    if (lats.isEmpty()) return SegmentSplit(emptyList(), emptyList())
+    val segments = mutableListOf<List<LatLon>>()
+    val gapPoints = mutableListOf<LatLon?>()
+    var current = mutableListOf<LatLon>()
+    gapPoints.add(null)
+    for (i in lats.indices) {
+        val pt = LatLon(lats[i], lons[i])
+        if (current.isNotEmpty() && abs(lats[i] - current.last().lat) > GAP_THRESHOLD) {
+            segments.add(current.toList())
+            current = mutableListOf()
+            gapPoints.add(pt)
+        } else {
+            current.add(pt)
+        }
+    }
+    if (current.isNotEmpty()) segments.add(current.toList())
+    return SegmentSplit(segments, gapPoints)
+}
 
 /**
  * Parses GPS Joystick Realm .db files at the binary level.
@@ -279,18 +310,27 @@ object RealmBinaryParser {
     /**
      * Structural information about the CoordinateData B-Tree in a Realm .db file.
      * Used by RealmFileExtender to perform lossless merges by appending new leaf nodes.
+     *
+     * [routeIdLeaves] is non-null when a non-Float64 column with the same entry count
+     * as lat/lon is found; it holds integer leaf nodes that encode which route each
+     * coordinate belongs to.  Null means no such column was detected.
      */
     data class CoordinateBTreeInfo(
         val node46Offset: Int,        // absolute offset of the 0x46 field-pointer node
         val latColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lat B-Tree root
         val lonColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lon B-Tree root
         val latLeaves: List<RealmNode.Float64Leaf>,
-        val lonLeaves: List<RealmNode.Float64Leaf>
+        val lonLeaves: List<RealmNode.Float64Leaf>,
+        val routeIdLeaves: List<RealmNode.IntLeaf>? = null
     )
 
     /**
      * Like findLatLonLeafNodes, but also returns the 0x46 node offset and column indices
      * so that callers can update the B-Tree root pointers in-place when extending the file.
+     *
+     * Also tries to detect a non-Float64 column in the same table (routeId / link column):
+     * any column whose B-tree leaves have a type byte ≠ 0x0c but carry the same number of
+     * entries as lat/lon is treated as a candidate route-ID column.
      */
     fun findCoordinateBTreeInfo(data: ByteArray): CoordinateBTreeInfo? {
         val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
@@ -298,30 +338,71 @@ object RealmBinaryParser {
         val (allFloatNodes, _) = parse(data)
         val floatNodeByOffset = allFloatNodes.associateBy { it.offset }
 
-        // Collect all 0x46 nodes with their absolute file offsets
-        val node46List = mutableListOf<Pair<Int, List<Int>>>() // (node46Offset, children)
+        // Build a map of ALL non-index, non-table leaf nodes keyed by offset,
+        // storing raw type byte, count and dataOffset.
+        // We infer bytesPerEntry from the gap to the next marker.
+        data class RawLeaf(val offset: Int, val typeByte: Int, val count: Int,
+                           val dataOffset: Int, val bytesPerEntry: Int)
+        val rawLeafByOffset = mutableMapOf<Int, RawLeaf>()
+        for (i in markers.indices) {
+            val off = markers[i]
+            if (off + 8 > data.size) continue
+            val t = data[off + 4].toInt() and 0xFF
+            if (t == 0xC5 || t == 0xC6 || t == 0x46) continue   // index / table nodes
+            val cnt = readNodeCount(data, off)
+            val dataStart = off + 8
+            val dataEnd = if (i + 1 < markers.size) markers[i + 1] else data.size
+            val bpe = if (cnt > 0 && dataEnd > dataStart) (dataEnd - dataStart) / cnt else -1
+            rawLeafByOffset[off] = RawLeaf(off, t, cnt, dataStart, bpe)
+        }
+
+        // Walk B-tree collecting ALL leaf nodes (any type).
+        // Returns pairs of (typeByte, RawLeaf).
+        fun traceAllRawLeaves(rootOffset: Int, depth: Int = 0): List<RawLeaf> {
+            if (depth > 8 || rootOffset < 0 || rootOffset + 8 > data.size) return emptyList()
+            if (data[rootOffset] != 0x41.toByte() || data[rootOffset+1] != 0x41.toByte() ||
+                data[rootOffset+2] != 0x41.toByte() || data[rootOffset+3] != 0x41.toByte()
+            ) return emptyList()
+            val t = data[rootOffset + 4].toInt() and 0xFF
+            val c = readNodeCount(data, rootOffset)
+            return when (t) {
+                0xC5 -> {
+                    if (c < 3 || rootOffset + 8 + c * 2 > data.size) emptyList()
+                    else (1 until c - 1).flatMap { i ->
+                        val child = buf.getShort(rootOffset + 8 + i * 2).toInt() and 0xFFFF
+                        rawLeafByOffset[child]?.let { listOf(it) }
+                            ?: traceAllRawLeaves(child, depth + 1)
+                    }
+                }
+                0xC6 -> {
+                    if (c < 3 || rootOffset + 8 + c * 4 > data.size) emptyList()
+                    else (1 until c - 1).flatMap { i ->
+                        val child = buf.getInt(rootOffset + 8 + i * 4)
+                        rawLeafByOffset[child]?.let { listOf(it) }
+                            ?: traceAllRawLeaves(child, depth + 1)
+                    }
+                }
+                else -> rawLeafByOffset[rootOffset]?.let { listOf(it) } ?: emptyList()
+            }
+        }
+
+        // Collect all 0x46 nodes
+        val node46List = mutableListOf<Pair<Int, List<Int>>>()
         for (offset in markers) {
             if (offset + 8 > data.size) continue
-            val type = data[offset + 4].toInt() and 0xFF
-            if (type == 0x46) {
-                val count = readNodeCount(data, offset)
-                if (count in 2..20 && offset + 8 + count * 4 <= data.size) {
-                    val children = mutableListOf<Int>()
-                    for (i in 0 until count) {
-                        children.add(buf.getInt(offset + 8 + i * 4))
-                    }
-                    node46List.add(Pair(offset, children))
-                }
+            if (data[offset + 4].toInt() and 0xFF != 0x46) continue
+            val count = readNodeCount(data, offset)
+            if (count in 2..20 && offset + 8 + count * 4 <= data.size) {
+                node46List.add(offset to (0 until count).map { i ->
+                    buf.getInt(offset + 8 + i * 4)
+                })
             }
         }
 
         for ((node46Offset, children) in node46List) {
             if (children.size != 4) continue
 
-            // Track which column index (position in 0x46's child list) produced
-            // each leaf set — avoids a reverse root-lookup that would return the
-            // wrong (stale) C6 root when the file has been pre-allocated and the
-            // 0x46 pointers have already been patched to new C6 roots.
+            // Trace all 4 columns, collecting both Float64 and any other type
             val columnLeavesWithIdx = children.mapIndexed { i, childOffset ->
                 i to traceBTreeLeaves(data, buf, childOffset, floatNodeByOffset)
             }
@@ -333,11 +414,8 @@ object RealmBinaryParser {
             val idx0 = validColumns[0].first
             val idx1 = validColumns[1].first
 
-            // Lower column index in schema = latitude
-            val latColIdx: Int
-            val lonColIdx: Int
-            val latLeaves: List<RealmNode.Float64Leaf>
-            val lonLeaves: List<RealmNode.Float64Leaf>
+            val latColIdx: Int; val lonColIdx: Int
+            val latLeaves: List<RealmNode.Float64Leaf>; val lonLeaves: List<RealmNode.Float64Leaf>
             if (idx0 < idx1) {
                 latColIdx = idx0; lonColIdx = idx1
                 latLeaves = validColumns[0].second; lonLeaves = validColumns[1].second
@@ -346,15 +424,107 @@ object RealmBinaryParser {
                 latLeaves = validColumns[1].second; lonLeaves = validColumns[0].second
             }
 
+            // Try to find a non-Float64 column in the same table with the same total
+            // entry count as lat — this is the route-ID / object-link column.
+            val coordEntryCount = latLeaves.sumOf { it.count }
+            val routeIdLeaves: List<RealmNode.IntLeaf>? = run {
+                for ((colIdx, childOffset) in children.withIndex()) {
+                    if (colIdx == latColIdx || colIdx == lonColIdx) continue
+                    val rawLeaves = traceAllRawLeaves(childOffset)
+                    // Only consider columns whose leaves are all non-Float64
+                    if (rawLeaves.isEmpty()) continue
+                    if (rawLeaves.any { it.typeByte == 0x0c }) continue   // skip Float64 (altitude)
+                    val totalEntries = rawLeaves.sumOf { it.count }
+                    if (totalEntries != coordEntryCount) continue
+                    // All leaves in this column must have the same bytesPerEntry (4 or 8)
+                    val bpe = rawLeaves.map { it.bytesPerEntry }.distinct()
+                    if (bpe.size != 1 || bpe[0] !in listOf(4, 8)) continue
+                    return@run rawLeaves.map { l ->
+                        RealmNode.IntLeaf(l.offset, l.typeByte.toByte(), l.count,
+                            l.dataOffset, bpe[0])
+                    }
+                }
+                null
+            }
+
             return CoordinateBTreeInfo(
                 node46Offset = node46Offset,
                 latColIndexIn46 = latColIdx,
                 lonColIndexIn46 = lonColIdx,
                 latLeaves = latLeaves,
-                lonLeaves = lonLeaves
+                lonLeaves = lonLeaves,
+                routeIdLeaves = routeIdLeaves
             )
         }
         return null
+    }
+
+    /** Read all integer values from a list of IntLeaf nodes (Int32 or Int64 → Long). */
+    fun readIntLeafValues(data: ByteArray, leaves: List<RealmNode.IntLeaf>): List<Long> {
+        val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        return buildList {
+            for (leaf in leaves) {
+                repeat(leaf.count) { i ->
+                    val pos = leaf.dataOffset + i * leaf.bytesPerEntry
+                    if (pos + leaf.bytesPerEntry <= data.size) {
+                        add(if (leaf.bytesPerEntry == 4) buf.getInt(pos).toLong() and 0xFFFFFFFFL
+                            else buf.getLong(pos))
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Derive per-route coordinate index ranges directly from the DB structure.
+     *
+     * Strategy (in priority order):
+     * 1. Route-ID column: read the integer column that links each coordinate to its
+     *    route row key.  When the value changes, a new route starts.
+     * 2. Gap detection fallback: delegate to [splitByGap] with 2.5° threshold.
+     *
+     * Returns a list of [IntRange] (inclusive start .. inclusive end) into the flat
+     * coordinate array.  Returns null only if the coordinate data itself is unreadable.
+     */
+    fun findRouteSegments(data: ByteArray): List<IntRange>? {
+        val bTreeInfo = findCoordinateBTreeInfo(data) ?: return null
+
+        fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
+            for (leaf in leaves) for (v in readFloat64Values(data, leaf)) if (v.isFinite()) add(v)
+        }
+        val lats = readFinite(bTreeInfo.latLeaves)
+        val lons = readFinite(bTreeInfo.lonLeaves)
+        val pairs = minOf(lats.size, lons.size)
+        if (pairs == 0) return emptyList()
+
+        // ── Strategy 1: route-ID column ──────────────────────────────────────
+        val routeIdLeaves = bTreeInfo.routeIdLeaves
+        if (routeIdLeaves != null) {
+            val ids = readIntLeafValues(data, routeIdLeaves)
+            if (ids.size == pairs) {
+                val ranges = mutableListOf<IntRange>()
+                var start = 0
+                for (i in 1..pairs) {
+                    if (i == pairs || ids[i] != ids[i - 1]) {
+                        ranges.add(start until i)
+                        start = i
+                    }
+                }
+                if (ranges.isNotEmpty()) return ranges
+            }
+        }
+
+        // ── Strategy 2: gap fallback ──────────────────────────────────────────
+        // Gap points occupy a position in the flat array; each segment's range
+        // must skip over the gap point that precedes it (gapPoints[0] is always null).
+        val split = splitByGap(lats.take(pairs), lons.take(pairs))
+        var cursor = 0
+        return split.segments.mapIndexed { idx, seg ->
+            if (split.gapPoints[idx] != null) cursor++   // skip gap-point position
+            val range = cursor until (cursor + seg.size)
+            cursor += seg.size
+            range
+        }
     }
 
     data class NodeParentRef(
@@ -402,6 +572,119 @@ object RealmBinaryParser {
         return null
     }
 
+    // ── Structural exploration ────────────────────────────────────────────────
+
+    /**
+     * Scan every AAAA node in the file and group them by type byte.
+     * For each type, infer [bytesPerEntry] by measuring the gap between
+     * consecutive nodes: gap = (nextMarker - dataStart) / count.
+     * This lets us distinguish Int32 (4 B), Int64/Float64 (8 B), etc.
+     */
+    fun scanNodeTypes(data: ByteArray): List<NodeTypeSummary> {
+        val markers = findAllMarkers(data)
+        // group: typeByte → list of (count, dataStart, dataEnd)
+        data class Entry(val count: Int, val dataStart: Int, val dataEnd: Int)
+        val groups = mutableMapOf<Int, MutableList<Entry>>()
+
+        for (i in markers.indices) {
+            val offset = markers[i]
+            if (offset + 8 > data.size) continue
+            val typeByte = data[offset + 4].toInt() and 0xFF
+            val count = readNodeCount(data, offset)
+            val dataStart = offset + 8
+            val dataEnd = if (i + 1 < markers.size) markers[i + 1] else data.size
+            groups.getOrPut(typeByte) { mutableListOf() }
+                .add(Entry(count, dataStart, dataEnd))
+        }
+
+        return groups.map { (typeByte, entries) ->
+            val totalEntries = entries.sumOf { it.count }
+            // infer bytes-per-entry from the most common non-zero count node
+            val bpe = entries
+                .filter { it.count > 0 && it.dataEnd > it.dataStart }
+                .map { (it.dataEnd - it.dataStart) / it.count }
+                .groupingBy { it }.eachCount()
+                .maxByOrNull { it.value }?.key ?: -1
+            NodeTypeSummary(typeByte, entries.size, totalEntries, bpe)
+        }.sortedBy { it.typeByte }
+    }
+
+    /**
+     * Find every 0x46 node (table descriptor) in the file and describe
+     * what type of leaf nodes each column's B-tree contains.
+     * Walks the B-tree of each column and records ALL node types encountered,
+     * not just Float64 leaves—so unknown integer/link types also show up.
+     */
+    fun probeAllTables(data: ByteArray): List<TableInfo> {
+        val buf = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val markers = findAllMarkers(data)
+        val (allFloatNodes, _) = parse(data)
+        val floatNodeByOffset = allFloatNodes.associateBy { it.offset }
+
+        // Collect all leaf nodes keyed by offset (any type)
+        data class AnyLeaf(val offset: Int, val typeByte: Int, val count: Int)
+        val anyLeafByOffset = mutableMapOf<Int, AnyLeaf>()
+        for (offset in markers) {
+            if (offset + 8 > data.size) continue
+            val t = data[offset + 4].toInt() and 0xFF
+            // Not a B-tree index node and not a column pointer — treat as leaf
+            if (t != 0xC5 && t != 0xC6 && t != 0x46) {
+                val c = readNodeCount(data, offset)
+                anyLeafByOffset[offset] = AnyLeaf(offset, t, c)
+            }
+        }
+
+        // Walk B-tree collecting ALL leaf types (not just Float64)
+        fun traceAllLeaves(rootOffset: Int, depth: Int = 0): List<AnyLeaf> {
+            if (depth > 8 || rootOffset < 0 || rootOffset + 8 > data.size) return emptyList()
+            if (data[rootOffset] != 0x41.toByte() || data[rootOffset+1] != 0x41.toByte() ||
+                data[rootOffset+2] != 0x41.toByte() || data[rootOffset+3] != 0x41.toByte()
+            ) return emptyList()
+            val t = data[rootOffset + 4].toInt() and 0xFF
+            val c = readNodeCount(data, rootOffset)
+            return when (t) {
+                0xC5 -> {
+                    if (c < 3 || rootOffset + 8 + c * 2 > data.size) emptyList()
+                    else (1 until c - 1).flatMap { i ->
+                        val child = buf.getShort(rootOffset + 8 + i * 2).toInt() and 0xFFFF
+                        anyLeafByOffset[child]?.let { listOf(it) }
+                            ?: traceAllLeaves(child, depth + 1)
+                    }
+                }
+                0xC6 -> {
+                    if (c < 3 || rootOffset + 8 + c * 4 > data.size) emptyList()
+                    else (1 until c - 1).flatMap { i ->
+                        val child = buf.getInt(rootOffset + 8 + i * 4)
+                        anyLeafByOffset[child]?.let { listOf(it) }
+                            ?: traceAllLeaves(child, depth + 1)
+                    }
+                }
+                else -> anyLeafByOffset[rootOffset]?.let { listOf(it) } ?: emptyList()
+            }
+        }
+
+        val tables = mutableListOf<TableInfo>()
+        for (offset in markers) {
+            if (offset + 8 > data.size) continue
+            if (data[offset + 4].toInt() and 0xFF != 0x46) continue
+            val colCount = readNodeCount(data, offset)
+            if (colCount < 1 || offset + 8 + colCount * 4 > data.size) continue
+
+            val columns = (0 until colCount).map { i ->
+                val childOffset = buf.getInt(offset + 8 + i * 4)
+                val leaves = traceAllLeaves(childOffset)
+                TableColumnInfo(
+                    columnIndex  = i,
+                    childTypes   = leaves.map { it.typeByte }.distinct().sorted(),
+                    leafCount    = leaves.size,
+                    entryCount   = leaves.sumOf { it.count }
+                )
+            }
+            tables.add(TableInfo(offset, columns))
+        }
+        return tables
+    }
+
     fun buildFileInfo(fileName: String, data: ByteArray): DbFileInfo {
         val (floatNodes, stringNodes) = parse(data)
         val markerCount = findAllMarkers(data).size
@@ -417,6 +700,9 @@ object RealmBinaryParser {
 
         val routeUuids = extractRouteUuids(data, stringNodes)
 
+        // Compute structure-based route count (route-ID column preferred, gap fallback)
+        val routeSegmentCount = findRouteSegments(data)?.size ?: 0
+
         return DbFileInfo(
             fileName = fileName,
             fileSize = data.size,
@@ -425,7 +711,8 @@ object RealmBinaryParser {
             stringNodes = stringNodes,
             totalFloatEntries = totalFloats,
             coordinateCapacity = latCapacity,
-            routeUuids = routeUuids
+            routeUuids = routeUuids,
+            routeSegmentCount = routeSegmentCount
         )
     }
 }
