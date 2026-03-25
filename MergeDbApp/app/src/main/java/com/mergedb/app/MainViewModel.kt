@@ -10,12 +10,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 sealed class MergeState {
     data object Idle : MergeState()
     data class Parsing(val slot: Int) : MergeState()
     data object Merging : MergeState()
+    data class ApplyingTsp(val current: Int, val total: Int) : MergeState()
     data class Success(
         val validation: MergeValidator.ValidationResult,
         val extendResult: RealmFileExtender.ExtendResult,
@@ -37,6 +39,13 @@ class MainViewModel : ViewModel() {
 
     private val _mergeCheck = MutableStateFlow<MergeEngine.MergeCheck?>(null)
     val mergeCheck: StateFlow<MergeEngine.MergeCheck?> = _mergeCheck
+
+    private val _applyTspOnMerge = MutableStateFlow(false)
+    val applyTspOnMerge: StateFlow<Boolean> = _applyTspOnMerge
+
+    fun toggleApplyTspOnMerge() {
+        _applyTspOnMerge.value = !_applyTspOnMerge.value
+    }
 
     private var fileAData: ByteArray? = null
     private var fileBData: ByteArray? = null
@@ -104,9 +113,28 @@ class MainViewModel : ViewModel() {
                 // Validate merged output: structural checks + coordinate sequence integrity
                 val validation = MergeValidator.validate(hostData, extendResult.data, guestData)
 
+                // Optionally apply TSP optimisation on the merged result
+                val outputData = if (_applyTspOnMerge.value) {
+                    val tspResult = TspEngine.optimizeDb(
+                        data = extendResult.data,
+                        config = TspConfig(),
+                        isCancelled = { !isActive },
+                        onProgress = { done, total ->
+                            _mergeState.value = MergeState.ApplyingTsp(done, total)
+                        }
+                    )
+                    RealmFileExtender.rewriteCoordinates(
+                        sourceData = extendResult.data,
+                        newLats = tspResult.reorderedLats,
+                        newLons = tspResult.reorderedLons
+                    )
+                } else {
+                    extendResult.data
+                }
+
                 // Write output
                 context.contentResolver.openOutputStream(outputUri)?.use { out ->
-                    out.write(extendResult.data)
+                    out.write(outputData)
                 } ?: throw Exception("無法寫入輸出檔案")
 
                 _mergeState.value = MergeState.Success(validation, extendResult, outputUri)

@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
                 val tspState by tspVm.state.collectAsState()
                 val tspConfig by tspVm.config.collectAsState()
+                val applyTspOnMerge by mergeVm.applyTspOnMerge.collectAsState()
 
                 Column(modifier = Modifier.fillMaxSize()) {
                     // ── Page content ──────────────────────────────────────────
@@ -66,6 +67,7 @@ class MainActivity : ComponentActivity() {
                             fileBInfo = fileBInfo,
                             mergeState = mergeState,
                             mergeCheck = mergeCheck,
+                            applyTspOnMerge = applyTspOnMerge,
                             onSelectFileA = {
                                 pendingFileSlot = 0
                                 mergeFilePickerLauncher.launch(arrayOf("*/*"))
@@ -78,6 +80,7 @@ class MainActivity : ComponentActivity() {
                                 val hostName = mergeCheck?.hostFileName ?: "merged"
                                 mergeOutputLauncher.launch("merged_$hostName")
                             },
+                            onToggleApplyTsp = { mergeVm.toggleApplyTspOnMerge() },
                             onDismissError = { mergeVm.resetState() },
                             modifier = Modifier.weight(1f)
                         )

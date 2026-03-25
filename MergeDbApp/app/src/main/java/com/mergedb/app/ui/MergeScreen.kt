@@ -21,9 +21,11 @@ fun MergeScreen(
     fileBInfo: DbFileInfo?,
     mergeState: MergeState,
     mergeCheck: MergeEngine.MergeCheck?,
+    applyTspOnMerge: Boolean,
     onSelectFileA: () -> Unit,
     onSelectFileB: () -> Unit,
     onMerge: () -> Unit,
+    onToggleApplyTsp: () -> Unit,
     onDismissError: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -111,9 +113,24 @@ fun MergeScreen(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = mergeCheck?.canMerge == true &&
                         mergeState !is MergeState.Merging &&
+                        mergeState !is MergeState.ApplyingTsp &&
                         mergeState !is MergeState.Parsing
             ) {
                 Text("合併", style = MaterialTheme.typography.titleMedium)
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Checkbox(
+                    checked = applyTspOnMerge,
+                    onCheckedChange = { onToggleApplyTsp() },
+                    enabled = mergeState !is MergeState.Merging &&
+                            mergeState !is MergeState.ApplyingTsp &&
+                            mergeState !is MergeState.Parsing
+                )
+                Text("合併時計算 TSP")
             }
 
             // Status display
@@ -125,6 +142,13 @@ fun MergeScreen(
                 is MergeState.Merging -> {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     Text("正在合併...")
+                }
+                is MergeState.ApplyingTsp -> {
+                    LinearProgressIndicator(
+                        progress = { if (mergeState.total > 0) mergeState.current.toFloat() / mergeState.total else 0f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("正在計算 TSP… 路線 ${mergeState.current} / ${mergeState.total}")
                 }
                 is MergeState.Success -> {
                     Card(
