@@ -22,7 +22,7 @@ sealed class MergeState {
         val validation: MergeValidator.ValidationResult,
         val extendResult: RealmFileExtender.ExtendResult,
         val tspResult: TspResult? = null,
-        val outputUri: Uri? = null
+        val savedPath: String = ""
     ) : MergeState()
     data class Error(val message: String) : MergeState()
 }
@@ -87,7 +87,7 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun onMerge(outputUri: Uri, context: Context) {
+    fun onMerge(context: Context) {
         val a = _fileAInfo.value ?: return
         val b = _fileBInfo.value ?: return
         val dataA = fileAData ?: return
@@ -134,12 +134,11 @@ class MainViewModel : ViewModel() {
                     extendResult.data
                 }
 
-                // Write output
-                context.contentResolver.openOutputStream(outputUri)?.use { out ->
-                    out.write(outputData)
-                } ?: throw Exception("無法寫入輸出檔案")
+                // Save directly — add timestamp if filename already exists
+                val outName = "merged_${hostInfo.fileName}"
+                val savedPath = FileHelper.save(outputData, outName, context)
 
-                _mergeState.value = MergeState.Success(validation, extendResult, tspResult, outputUri)
+                _mergeState.value = MergeState.Success(validation, extendResult, tspResult, savedPath)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

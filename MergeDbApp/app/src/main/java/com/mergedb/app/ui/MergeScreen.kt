@@ -163,6 +163,13 @@ fun MergeScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
+                            if (mergeState.savedPath.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "已儲存: ${mergeState.savedPath}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                             Spacer(modifier = Modifier.height(4.dp))
                             val er = mergeState.extendResult
                             if (er.wasExtended) {

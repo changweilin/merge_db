@@ -20,7 +20,7 @@ sealed class TspState {
     data class Ready(val info: DbFileInfo, val routeCount: Int, val totalPoints: Int) : TspState()
     data class GpxReady(val fileName: String, val pointCount: Int) : TspState()
     data class Optimizing(val current: Int, val total: Int) : TspState()
-    data class Done(val result: TspResult) : TspState()
+    data class Done(val result: TspResult, val savedPath: String = "") : TspState()
     data class Error(val message: String) : TspState()
     data class DbStructure(val report: String) : TspState()
 }
@@ -192,12 +192,12 @@ class TspViewModel : ViewModel() {
 
     // ── Export ────────────────────────────────────────────────────────────────
 
-    fun exportResult(outputUri: Uri, context: Context) {
-        if (_inputIsGpx.value) exportGpxResult(outputUri, context)
-        else exportDbResult(outputUri, context)
+    fun exportResult(context: Context) {
+        if (_inputIsGpx.value) exportGpxResult(context)
+        else exportDbResult(context)
     }
 
-    private fun exportDbResult(outputUri: Uri, context: Context) {
+    private fun exportDbResult(context: Context) {
         val data = fileData ?: return
         val result = (_state.value as? TspState.Done)?.result ?: return
         viewModelScope.launch(Dispatchers.IO) {
@@ -207,8 +207,8 @@ class TspViewModel : ViewModel() {
                     newLats = result.reorderedLats,
                     newLons = result.reorderedLons
                 )
-                context.contentResolver.openOutputStream(outputUri)?.use { it.write(rewritten) }
-                    ?: error("無法寫入輸出檔案")
+                val savedPath = FileHelper.save(rewritten, suggestedExportFileName(), context)
+                _state.value = TspState.Done(result, savedPath)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -217,15 +217,15 @@ class TspViewModel : ViewModel() {
         }
     }
 
-    private fun exportGpxResult(outputUri: Uri, context: Context) {
+    private fun exportGpxResult(context: Context) {
         val result = (_state.value as? TspState.Done)?.result ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val optimizedPoints = result.reorderedLats.zip(result.reorderedLons)
                     .map { (lat, lon) -> LatLon(lat, lon) }
                 val gpxBytes = GpxParser.export(optimizedPoints, gpxTrackName)
-                context.contentResolver.openOutputStream(outputUri)?.use { it.write(gpxBytes) }
-                    ?: error("無法寫入輸出檔案")
+                val savedPath = FileHelper.save(gpxBytes, suggestedExportFileName(), context)
+                _state.value = TspState.Done(result, savedPath)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

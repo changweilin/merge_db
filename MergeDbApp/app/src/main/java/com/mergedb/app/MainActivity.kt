@@ -24,10 +24,6 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { mergeVm.onFileSelected(pendingFileSlot, it, this) } }
 
-    private val mergeOutputLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri -> uri?.let { mergeVm.onMerge(it, this) } }
-
     // ── TSP launchers ─────────────────────────────────────────────────────────
     private val tspFilePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -36,14 +32,6 @@ class MainActivity : ComponentActivity() {
     private val tspGpxPickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { tspVm.loadGpxFile(it, this) } }
-
-    private val tspOutputLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri -> uri?.let { tspVm.exportResult(it, this) } }
-
-    private val tspGpxOutputLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/gpx+xml")
-    ) { uri -> uri?.let { tspVm.exportResult(it, this) } }
 
     private lateinit var mergeVm: MainViewModel
     private lateinit var tspVm: TspViewModel
@@ -85,10 +73,7 @@ class MainActivity : ComponentActivity() {
                                 pendingFileSlot = 1
                                 mergeFilePickerLauncher.launch(arrayOf("*/*"))
                             },
-                            onMerge = {
-                                val hostName = mergeCheck?.hostFileName ?: "merged"
-                                mergeOutputLauncher.launch("merged_$hostName")
-                            },
+                            onMerge = { mergeVm.onMerge(this@MainActivity) },
                             onToggleApplyTsp = { mergeVm.toggleApplyTspOnMerge() },
                             onDismissError = { mergeVm.resetState() },
                             modifier = Modifier.weight(1f)
@@ -106,11 +91,7 @@ class MainActivity : ComponentActivity() {
                             onSetTimeout = { tspVm.setTimeoutMs(it) },
                             onSetMaxJump = { tspVm.setMaxConsecutiveJumpKm(it) },
                             onRunOptimize = { tspVm.runOptimize() },
-                            onExport = {
-                                val fileName = tspVm.suggestedExportFileName()
-                                if (tspIsGpx) tspGpxOutputLauncher.launch(fileName)
-                                else tspOutputLauncher.launch(fileName)
-                            },
+                            onExport = { tspVm.exportResult(this@MainActivity) },
                             onReset = { tspVm.reset() },
                             onDismissError = { tspVm.dismissError() },
                             onAnalyzeStructure = { tspVm.analyzeDbStructure() },

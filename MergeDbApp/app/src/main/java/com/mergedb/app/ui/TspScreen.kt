@@ -111,6 +111,13 @@ fun TspScreen(
                         is TspState.Done -> {
                             Spacer(Modifier.height(8.dp))
                             Text("優化完成  已改善 ${state.result.improvedRoutes} / ${state.result.totalRoutes} 條路線")
+                            if (state.savedPath.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "已儲存: ${state.savedPath}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
                         else -> {}
                     }
