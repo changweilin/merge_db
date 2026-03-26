@@ -436,12 +436,20 @@ object RealmBinaryParser {
                     if (rawLeaves.any { it.typeByte == 0x0c }) continue   // skip Float64 (altitude)
                     val totalEntries = rawLeaves.sumOf { it.count }
                     if (totalEntries != coordEntryCount) continue
-                    // All leaves in this column must have the same bytesPerEntry (4 or 8)
-                    val bpe = rawLeaves.map { it.bytesPerEntry }.distinct()
-                    if (bpe.size != 1 || bpe[0] !in listOf(4, 8)) continue
+                    // Determine bytes-per-entry by ignoring bpe=0 leaves (the next-marker
+                    // heuristic underestimates data span when route-ID bytes form AAAA
+                    // patterns, yielding bpe=0 for that node).  Accepted sizes: 1, 2, 4, 8.
+                    // Mixed 1+2 byte encoding is allowed (Realm uses 1-byte keys for small
+                    // databases, 2-byte for larger ones; both may appear in the same column).
+                    val validBpe = setOf(1, 2, 4, 8)
+                    val bpe = rawLeaves.map { it.bytesPerEntry }.filter { it in validBpe }.distinct()
+                    if (bpe.isEmpty() || bpe.any { it !in validBpe }) continue
+                    // Assign inferred bpe to leaves whose bpe was measured as 0
+                    val fallbackBpe = bpe.min()   // prefer the smallest observed bpe
                     return@run rawLeaves.map { l ->
+                        val effectiveBpe = if (l.bytesPerEntry in validBpe) l.bytesPerEntry else fallbackBpe
                         RealmNode.IntLeaf(l.offset, l.typeByte.toByte(), l.count,
-                            l.dataOffset, bpe[0])
+                            l.dataOffset, effectiveBpe)
                     }
                 }
                 null
@@ -467,8 +475,12 @@ object RealmBinaryParser {
                 repeat(leaf.count) { i ->
                     val pos = leaf.dataOffset + i * leaf.bytesPerEntry
                     if (pos + leaf.bytesPerEntry <= data.size) {
-                        add(if (leaf.bytesPerEntry == 4) buf.getInt(pos).toLong() and 0xFFFFFFFFL
-                            else buf.getLong(pos))
+                        add(when (leaf.bytesPerEntry) {
+                            1 -> buf.get(pos).toLong() and 0xFFL
+                            2 -> buf.getShort(pos).toLong() and 0xFFFFL
+                            4 -> buf.getInt(pos).toLong() and 0xFFFFFFFFL
+                            else -> buf.getLong(pos)
+                        })
                     }
                 }
             }
@@ -497,20 +509,29 @@ object RealmBinaryParser {
         val pairs = minOf(lats.size, lons.size)
         if (pairs == 0) return emptyList()
 
-        // ── Strategy 1: route-ID column ──────────────────────────────────────
+        // ── Strategy 1: route-ID column (group by distinct ID) ──────────────
+        // Group coordinate indices by route-ID in order of first appearance.
+        // Using distinct grouping (not consecutive-change counting) so the
+        // resulting segment count equals the number of distinct route IDs,
+        // which matches routeUuids.size by construction.
         val routeIdLeaves = bTreeInfo.routeIdLeaves
         if (routeIdLeaves != null) {
             val ids = readIntLeafValues(data, routeIdLeaves)
             if (ids.size == pairs) {
-                val ranges = mutableListOf<IntRange>()
-                var start = 0
-                for (i in 1..pairs) {
-                    if (i == pairs || ids[i] != ids[i - 1]) {
-                        ranges.add(start until i)
-                        start = i
+                val idOrder = mutableListOf<Long>()
+                val idFirst = linkedMapOf<Long, Int>()
+                val idLast  = linkedMapOf<Long, Int>()
+                for (i in ids.indices) {
+                    val id = ids[i]
+                    if (!idFirst.containsKey(id)) {
+                        idOrder.add(id)
+                        idFirst[id] = i
                     }
+                    idLast[id] = i
                 }
-                if (ranges.isNotEmpty()) return ranges
+                if (idOrder.isNotEmpty()) {
+                    return idOrder.map { id -> idFirst[id]!!..idLast[id]!! }
+                }
             }
         }
 

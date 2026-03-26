@@ -306,21 +306,20 @@ private fun ResultCard(result: TspResult) {
             Text("已略過: ${result.skippedRoutes} 條")
             Spacer(Modifier.height(8.dp))
 
-            result.routeResults.take(20).forEach { r ->
+            result.routeResults.forEach { r ->
+                val pct = if (r.originalLength > 0)
+                    (r.originalLength - r.optimizedLength) / r.originalLength * 100 else 0.0
+                val origKm = r.originalLength / 1000.0
+                val optKm  = r.optimizedLength / 1000.0
                 val status = when {
-                    r.skipped -> "略過: ${r.reason}"
-                    r.improved -> "改善 %.1f%%".format(
-                        if (r.originalLength > 0) (r.originalLength - r.optimizedLength) / r.originalLength * 100 else 0.0
-                    )
-                    else -> "未採用: ${r.reason}"
+                    r.skipped  -> "略過: ${r.reason}"
+                    r.improved -> "改善 %.1f%%  (%.2f→%.2f km)".format(pct, origKm, optKm)
+                    else       -> "未採用 %.1f%%  (%.2f→%.2f km)  ${r.reason}".format(pct, origKm, optKm)
                 }
                 Text(
                     "路線 ${r.index + 1}: $status",
                     style = MaterialTheme.typography.bodySmall
                 )
-            }
-            if (result.routeResults.size > 20) {
-                Text("… 還有 ${result.routeResults.size - 20} 條", style = MaterialTheme.typography.bodySmall)
             }
         }
     }

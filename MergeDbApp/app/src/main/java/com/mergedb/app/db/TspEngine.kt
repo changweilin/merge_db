@@ -439,8 +439,8 @@ object TspEngine {
         val lons = readFinite(bTreeInfo.lonLeaves)
         val pairs = minOf(lats.size, lons.size)
 
-        // findRouteSegments: strategy 1 = route-ID column, strategy 2 = gap fallback.
-        // Each IntRange covers positions [start, end) in the flat coordinate array.
+        // findRouteSegments: strategy 1 = route-ID column (distinct grouping), strategy 2 = gap fallback.
+        // Each IntRange covers positions [first..last] inclusive in the flat coordinate array.
         // Positions not covered by any range (gap sentinel points) are left untouched.
         val ranges = RealmBinaryParser.findRouteSegments(data)
             ?: error("無法分析路線結構")

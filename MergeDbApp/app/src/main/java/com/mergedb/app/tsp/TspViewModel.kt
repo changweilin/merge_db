@@ -173,12 +173,34 @@ class TspViewModel : ViewModel() {
                         .format(ridLeaf.type.toInt() and 0xFF, ridLeaf.bytesPerEntry)
                 else "Strategy 2: gap fallback (no integer column found)"
                 sb.appendLine(strategy)
-                val segments = RealmBinaryParser.findRouteSegments(data)
-                sb.appendLine("Segments: ${segments?.size ?: "null"}")
-                segments?.take(10)?.forEachIndexed { i, r ->
-                    sb.appendLine("  [$i] positions ${r.first}..${r.last}  (${r.last - r.first + 1} pts)")
+
+                fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
+                    for (leaf in leaves)
+                        for (v in RealmBinaryParser.readFloat64Values(data, leaf))
+                            if (v.isFinite()) add(v)
                 }
-                if ((segments?.size ?: 0) > 10) sb.appendLine("  … (showing first 10)")
+                val lats = readFinite(bTreeInfo.latLeaves)
+                val lons = readFinite(bTreeInfo.lonLeaves)
+                val pairs = minOf(lats.size, lons.size)
+
+                val segments = RealmBinaryParser.findRouteSegments(data)
+                sb.appendLine("UUID 數: ${RealmBinaryParser.extractRouteUuids(data, RealmBinaryParser.parse(data).second).size}  Segments: ${segments?.size ?: "null"}  總座標: $pairs")
+                sb.appendLine()
+                segments?.forEachIndexed { i, r ->
+                    val indices = (r.first..r.last).filter { it < pairs }
+                    if (indices.isEmpty()) {
+                        sb.appendLine("[$i] 空段 range=${r.first}..${r.last}")
+                        return@forEachIndexed
+                    }
+                    val segLats = indices.map { lats[it] }
+                    val segLons = indices.map { lons[it] }
+                    sb.appendLine(
+                        "[%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]"
+                            .format(i, segLats.size,
+                                segLats.min(), segLats.max(),
+                                segLons.min(), segLons.max())
+                    )
+                }
             }
             sb.appendLine()
 
