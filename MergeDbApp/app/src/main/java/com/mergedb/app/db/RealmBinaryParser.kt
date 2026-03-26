@@ -489,16 +489,32 @@ object RealmBinaryParser {
 
     /**
      * Derive per-route coordinate index ranges directly from the DB structure.
+     * Returns [IntRange] (idFirst..idLast inclusive) for each route.  Used only for
+     * display / segment-count purposes; [findRouteSegmentIndices] should be preferred
+     * for any calculation that needs accurate per-route coordinates.
+     */
+    fun findRouteSegments(data: ByteArray): List<IntRange>? =
+        findRouteSegmentIndices(data)?.map { idxList ->
+            if (idxList.isEmpty()) 0..(-1)
+            else idxList.first()..idxList.last()
+        }
+
+    /**
+     * Derive the exact flat-array positions belonging to each route segment.
+     *
+     * Unlike [findRouteSegments] which returns [idFirst..idLast] (an inclusive range
+     * that may contain foreign coordinates from interleaved routes), this function
+     * returns only the positions where the coordinate actually belongs to that route.
      *
      * Strategy (in priority order):
-     * 1. Route-ID column: read the integer column that links each coordinate to its
-     *    route row key.  When the value changes, a new route starts.
-     * 2. Gap detection fallback: delegate to [splitByGap] with 2.5° threshold.
+     * 1. Route-ID column — group positions by exact ID value (membership, not range).
+     *    Each segment's list contains only positions where ids[pos] == routeId.
+     *    Non-contiguous positions are preserved; foreign points are excluded.
+     * 2. Gap detection fallback — delegate to [splitByGap] with 2.5° threshold.
      *
-     * Returns a list of [IntRange] (inclusive start .. inclusive end) into the flat
-     * coordinate array.  Returns null only if the coordinate data itself is unreadable.
+     * Returns null only if the coordinate data itself is unreadable.
      */
-    fun findRouteSegments(data: ByteArray): List<IntRange>? {
+    fun findRouteSegmentIndices(data: ByteArray): List<List<Int>>? {
         val bTreeInfo = findCoordinateBTreeInfo(data) ?: return null
 
         fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
@@ -509,42 +525,40 @@ object RealmBinaryParser {
         val pairs = minOf(lats.size, lons.size)
         if (pairs == 0) return emptyList()
 
-        // ── Strategy 1: route-ID column (group by distinct ID) ──────────────
-        // Group coordinate indices by route-ID in order of first appearance.
-        // Using distinct grouping (not consecutive-change counting) so the
-        // resulting segment count equals the number of distinct route IDs,
-        // which matches routeUuids.size by construction.
+        // ── Strategy 1: exact ID membership ──────────────────────────────────
+        // Collect each position into the bucket of its route ID.  The resulting
+        // index list may be non-contiguous when routes are interleaved (which is
+        // what produces spurious large distances with the old range-based approach).
         val routeIdLeaves = bTreeInfo.routeIdLeaves
         if (routeIdLeaves != null) {
             val ids = readIntLeafValues(data, routeIdLeaves)
             if (ids.size == pairs) {
-                val idOrder = mutableListOf<Long>()
-                val idFirst = linkedMapOf<Long, Int>()
-                val idLast  = linkedMapOf<Long, Int>()
+                val idOrder   = mutableListOf<Long>()
+                val idIndices = linkedMapOf<Long, MutableList<Int>>()
                 for (i in ids.indices) {
                     val id = ids[i]
-                    if (!idFirst.containsKey(id)) {
+                    if (!idIndices.containsKey(id)) {
                         idOrder.add(id)
-                        idFirst[id] = i
+                        idIndices[id] = mutableListOf()
                     }
-                    idLast[id] = i
+                    idIndices[id]!!.add(i)
                 }
                 if (idOrder.isNotEmpty()) {
-                    return idOrder.map { id -> idFirst[id]!!..idLast[id]!! }
+                    return idOrder.map { id -> idIndices[id]!! }
                 }
             }
         }
 
         // ── Strategy 2: gap fallback ──────────────────────────────────────────
-        // Gap points occupy a position in the flat array; each segment's range
-        // must skip over the gap point that precedes it (gapPoints[0] is always null).
+        // Gap points occupy one flat-array position; each segment's indices skip
+        // the gap point that precedes it (gapPoints[0] is always null).
         val split = splitByGap(lats.take(pairs), lons.take(pairs))
         var cursor = 0
         return split.segments.mapIndexed { idx, seg ->
-            if (split.gapPoints[idx] != null) cursor++   // skip gap-point position
-            val range = cursor until (cursor + seg.size)
+            if (split.gapPoints[idx] != null) cursor++   // skip gap sentinel position
+            val indices = (cursor until cursor + seg.size).toList()
             cursor += seg.size
-            range
+            indices
         }
     }
 

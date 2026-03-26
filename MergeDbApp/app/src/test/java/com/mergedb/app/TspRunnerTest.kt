@@ -60,7 +60,7 @@ class TspRunnerTest {
 
             val (_, stringNodes) = RealmBinaryParser.parse(data)
             val uuidCount = RealmBinaryParser.extractRouteUuids(data, stringNodes).size
-            val segments  = RealmBinaryParser.findRouteSegments(data)
+            val segments  = RealmBinaryParser.findRouteSegmentIndices(data)
             println("UUID 數: $uuidCount   Segments: ${segments?.size ?: "null"}   總座標: $pairs")
 
             if (uuidCount != (segments?.size ?: -1)) {
@@ -68,15 +68,14 @@ class TspRunnerTest {
             }
 
             println()
-            segments?.forEachIndexed { i, r ->
-                val indices = (r.first..r.last).filter { it < pairs }
+            segments?.forEachIndexed { i, indices ->
                 if (indices.isEmpty()) {
-                    println("  [%2d] 空段 range=${r.first}..${r.last}".format(i))
+                    println("  [%2d] 空段".format(i))
                     return@forEachIndexed
                 }
                 val sl = indices.map { lats[it] }
                 val so = indices.map { lons[it] }
-                val pts = indices.map { com.mergedb.app.db.LatLon(lats[it], lons[it]) }
+                val pts = indices.map { LatLon(lats[it], lons[it]) }
                 val maxJumpKm = TspEngine.maxConsecutiveJump(pts) / 1000.0
                 val jumpFlag = if (maxJumpKm > 500.0) "  ⚠ 最大跳躍 ${"%.0f".format(maxJumpKm)} km" else ""
                 println("  [%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]$jumpFlag"
@@ -106,10 +105,9 @@ class TspRunnerTest {
                         idCount[id] = (idCount[id] ?: 0) + 1
                     }
 
-                    // 找出大跳躍段索引（同前）
+                    // 找出大跳躍段索引（同前，使用精確索引）
                     val largeJumpIdx = mutableSetOf<Int>()
-                    segments?.forEachIndexed { si, r ->
-                        val idx2 = (r.first..r.last).filter { it < pairs }
+                    segments?.forEachIndexed { si, idx2 ->
                         if (idx2.isEmpty()) return@forEachIndexed
                         val pts = idx2.map { LatLon(lats[it], lons[it]) }
                         if (TspEngine.maxConsecutiveJump(pts) / 1000.0 > 500.0) largeJumpIdx.add(si)
@@ -132,8 +130,10 @@ class TspRunnerTest {
 
                             // 外來點屬於哪些路線？
                             if (foreignCount > 0) {
-                                val r = segments?.getOrNull(si) ?: continue
-                                val foreignIds = (r.first..r.last)
+                                // reconstruct full range from idFirstMap/idLastMap
+                                val rangeFirst = idFirstMap[routeId] ?: continue
+                                val rangeLast  = idLastMap[routeId]  ?: continue
+                                val foreignIds = (rangeFirst..rangeLast)
                                     .filter { it < pairs && ids[it] != routeId }
                                     .map { ids[it] }
                                     .groupingBy { it }.eachCount()
@@ -149,9 +149,8 @@ class TspRunnerTest {
 
                             // 印出 ±2 鄰段資訊
                             for (neighbor in (si - 2)..(si + 2)) {
-                                val nr = segments?.getOrNull(neighbor) ?: continue
-                                val nid = idOrder2.getOrNull(neighbor) ?: continue
-                                val nIdx = (nr.first..nr.last).filter { it < pairs }
+                                val nIdx = segments?.getOrNull(neighbor) ?: continue
+                                val nid  = idOrder2.getOrNull(neighbor) ?: continue
                                 if (nIdx.isEmpty()) { println("    [%3d] 空段".format(neighbor)); continue }
                                 val nPts = nIdx.map { LatLon(lats[it], lons[it]) }
                                 val nJump = TspEngine.maxConsecutiveJump(nPts) / 1000.0

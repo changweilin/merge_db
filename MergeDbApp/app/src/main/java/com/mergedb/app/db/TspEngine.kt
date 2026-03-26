@@ -455,22 +455,22 @@ object TspEngine {
         val lons = readFinite(bTreeInfo.lonLeaves)
         val pairs = minOf(lats.size, lons.size)
 
-        // findRouteSegments: strategy 1 = route-ID column (distinct grouping), strategy 2 = gap fallback.
-        // Each IntRange covers positions [first..last] inclusive in the flat coordinate array.
-        // Positions not covered by any range (gap sentinel points) are left untouched.
-        val ranges = RealmBinaryParser.findRouteSegments(data)
+        // findRouteSegmentIndices: strategy 1 = exact ID membership (non-contiguous safe),
+        // strategy 2 = gap fallback.  Each List<Int> contains only the flat-array positions
+        // that truly belong to this route — no foreign points from interleaved routes.
+        val segments = RealmBinaryParser.findRouteSegmentIndices(data)
             ?: error("無法分析路線結構")
-        val totalRoutes = ranges.size
+        val totalRoutes = segments.size
 
-        // Work on mutable copies; untouched positions (gap points) stay as-is.
+        // Work on mutable copies; positions not in any segment stay as-is.
         val outLat = lats.take(pairs).toMutableList()
         val outLon = lons.take(pairs).toMutableList()
         val routeResults = mutableListOf<TspRouteResult>()
         var improvedCount = 0
         var skippedCount = 0
 
-        for ((idx, range) in ranges.withIndex()) {
-            val n = range.last - range.first + 1   // range is start until end (exclusive)
+        for ((idx, segIndices) in segments.withIndex()) {
+            val n = segIndices.size
 
             if (n <= 2) {
                 routeResults.add(TspRouteResult(idx, 0.0, 0.0, false, false, "點數 ≤ 2，略過"))
@@ -486,11 +486,10 @@ object TspEngine {
                 continue
             }
 
-            val seg = (range).map { LatLon(lats[it], lons[it]) }
+            val seg = segIndices.map { LatLon(lats[it], lons[it]) }
 
-            // Detect mis-segmented routes: if any two consecutive points are more than
-            // maxConsecutiveJumpKm apart, this segment likely spans unrelated geographic
-            // regions (interleaved route-ID data) and should not be TSP-optimised.
+            // maxConsecutiveJumpKm is retained as a safety net for any remaining
+            // geographic anomalies (e.g. corrupt IDs that still mix distant regions).
             if (config.maxConsecutiveJumpKm > 0) {
                 val jumpM = maxConsecutiveJump(seg)
                 val jumpKm = jumpM / 1000.0
@@ -512,10 +511,12 @@ object TspEngine {
             val apply = improvement >= config.improvementThreshold
 
             if (apply) {
-                // Write reordered coordinates back into the same positions in-place
+                // Write reordered coordinates back to their exact original positions.
+                // segIndices[i] is the flat-array slot for output position i;
+                // seg[srcIdx] is the source coordinate chosen by TSP for that slot.
                 order.forEachIndexed { i, srcIdx ->
-                    outLat[range.first + i] = seg[srcIdx].lat
-                    outLon[range.first + i] = seg[srcIdx].lon
+                    outLat[segIndices[i]] = seg[srcIdx].lat
+                    outLon[segIndices[i]] = seg[srcIdx].lon
                 }
             }
 

@@ -187,13 +187,12 @@ class TspViewModel : ViewModel() {
                 val lons = readFinite(bTreeInfo.lonLeaves)
                 val pairs = minOf(lats.size, lons.size)
 
-                val segments = RealmBinaryParser.findRouteSegments(data)
+                val segments = RealmBinaryParser.findRouteSegmentIndices(data)
                 sb.appendLine("UUID 數: ${RealmBinaryParser.extractRouteUuids(data, RealmBinaryParser.parse(data).second).size}  Segments: ${segments?.size ?: "null"}  總座標: $pairs")
                 sb.appendLine()
-                segments?.forEachIndexed { i, r ->
-                    val indices = (r.first..r.last).filter { it < pairs }
+                segments?.forEachIndexed { i, indices ->
                     if (indices.isEmpty()) {
-                        sb.appendLine("[$i] 空段 range=${r.first}..${r.last}")
+                        sb.appendLine("[$i] 空段")
                         return@forEachIndexed
                     }
                     val segLats = indices.map { lats[it] }
