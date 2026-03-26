@@ -57,6 +57,10 @@ class TspViewModel : ViewModel() {
         _config.value = _config.value.copy(timeoutMs = ms)
     }
 
+    fun setMaxConsecutiveJumpKm(km: Double) {
+        _config.value = _config.value.copy(maxConsecutiveJumpKm = km)
+    }
+
     // ── File loading ──────────────────────────────────────────────────────────
 
     fun loadFile(uri: Uri, context: Context) {
@@ -194,8 +198,11 @@ class TspViewModel : ViewModel() {
                     }
                     val segLats = indices.map { lats[it] }
                     val segLons = indices.map { lons[it] }
+                    val pts = indices.map { com.mergedb.app.db.LatLon(lats[it], lons[it]) }
+                    val maxJumpKm = com.mergedb.app.db.TspEngine.maxConsecutiveJump(pts) / 1000.0
+                    val jumpFlag = if (maxJumpKm > 500.0) "  ⚠跳躍${"%.0f".format(maxJumpKm)}km" else ""
                     sb.appendLine(
-                        "[%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]"
+                        "[%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]$jumpFlag"
                             .format(i, segLats.size,
                                 segLats.min(), segLats.max(),
                                 segLons.min(), segLons.max())

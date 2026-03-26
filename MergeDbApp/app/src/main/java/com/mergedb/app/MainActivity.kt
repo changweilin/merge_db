@@ -93,6 +93,7 @@ class MainActivity : ComponentActivity() {
                             onSetSkipThreshold = { tspVm.setSkipLargeThreshold(it) },
                             onSetImprovementThreshold = { tspVm.setImprovementThreshold(it) },
                             onSetTimeout = { tspVm.setTimeoutMs(it) },
+                            onSetMaxJump = { tspVm.setMaxConsecutiveJumpKm(it) },
                             onRunOptimize = { tspVm.runOptimize() },
                             onExport = {
                                 val tspFileName = (tspState as? com.mergedb.app.tsp.TspState.Done)?.let {

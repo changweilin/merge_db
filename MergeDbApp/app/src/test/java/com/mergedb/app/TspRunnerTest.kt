@@ -76,7 +76,10 @@ class TspRunnerTest {
                 }
                 val sl = indices.map { lats[it] }
                 val so = indices.map { lons[it] }
-                println("  [%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]"
+                val pts = indices.map { com.mergedb.app.db.LatLon(lats[it], lons[it]) }
+                val maxJumpKm = TspEngine.maxConsecutiveJump(pts) / 1000.0
+                val jumpFlag = if (maxJumpKm > 500.0) "  ⚠ 最大跳躍 ${"%.0f".format(maxJumpKm)} km" else ""
+                println("  [%2d] %4d pts  lat=[%8.4f, %8.4f]  lon=[%9.4f, %9.4f]$jumpFlag"
                     .format(i, sl.size, sl.min(), sl.max(), so.min(), so.max()))
             }
 
@@ -130,7 +133,8 @@ class TspRunnerTest {
                 optimizer = TspOptimizer.OPT_2,
                 skipLargeThreshold = 1024,
                 improvementThreshold = 0.0,
-                timeoutMs = 120_000L
+                timeoutMs = 120_000L,
+                maxConsecutiveJumpKm = 500.0
             )
 
             try {

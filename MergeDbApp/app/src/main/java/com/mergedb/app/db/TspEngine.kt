@@ -26,7 +26,10 @@ data class TspConfig(
     val optimizer: TspOptimizer = TspOptimizer.OPT_2,
     val skipLargeThreshold: Int = 256,
     val improvementThreshold: Double = 0.0,
-    val timeoutMs: Long = 60_000L
+    val timeoutMs: Long = 60_000L,
+    /** Skip any segment whose maximum consecutive-point jump exceeds this threshold (km).
+     *  Catches mis-segmented routes whose coordinate range spans multiple geographic regions. */
+    val maxConsecutiveJumpKm: Double = 500.0
 )
 
 data class TspRouteResult(
@@ -410,6 +413,19 @@ object TspEngine {
         }
     }
 
+    // ── Segment diagnostics ───────────────────────────────────────────────────
+
+    /** Maximum haversine distance (metres) between consecutive points in [points]. */
+    fun maxConsecutiveJump(points: List<LatLon>): Double {
+        if (points.size < 2) return 0.0
+        var maxD = 0.0
+        for (i in 0 until points.size - 1) {
+            val d = haversine(points[i], points[i + 1])
+            if (d > maxD) maxD = d
+        }
+        return maxD
+    }
+
     // ── DB-level optimisation ─────────────────────────────────────────────────
 
     /**
@@ -471,6 +487,21 @@ object TspEngine {
             }
 
             val seg = (range).map { LatLon(lats[it], lons[it]) }
+
+            // Detect mis-segmented routes: if any two consecutive points are more than
+            // maxConsecutiveJumpKm apart, this segment likely spans unrelated geographic
+            // regions (interleaved route-ID data) and should not be TSP-optimised.
+            if (config.maxConsecutiveJumpKm > 0) {
+                val jumpM = maxConsecutiveJump(seg)
+                val jumpKm = jumpM / 1000.0
+                if (jumpKm > config.maxConsecutiveJumpKm) {
+                    routeResults.add(TspRouteResult(idx, 0.0, 0.0, false, true,
+                        "相鄰跳躍 ${"%.0f".format(jumpKm)} km 超過門檻 ${"%.0f".format(config.maxConsecutiveJumpKm)} km"))
+                    skippedCount++
+                    onProgress(idx + 1, totalRoutes)
+                    continue
+                }
+            }
             val dist = buildDistMatrix(seg)
             val identity = IntArray(n) { it }
             val origLen = tourLength(seg, identity, dist)

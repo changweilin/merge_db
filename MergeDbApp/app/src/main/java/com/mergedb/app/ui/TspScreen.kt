@@ -26,6 +26,7 @@ fun TspScreen(
     onSetSkipThreshold: (Int) -> Unit,
     onSetImprovementThreshold: (Double) -> Unit,
     onSetTimeout: (Long) -> Unit,
+    onSetMaxJump: (Double) -> Unit,
     onRunOptimize: () -> Unit,
     onExport: () -> Unit,
     onReset: () -> Unit,
@@ -180,6 +181,23 @@ fun TspScreen(
                             v.toIntOrNull()?.let { if (it > 0) onSetSkipThreshold(it) }
                         },
                         label = { Text("略過大型路線 (點數上限)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // Max consecutive jump filter
+                    var jumpText by remember(config.maxConsecutiveJumpKm) {
+                        mutableStateOf(config.maxConsecutiveJumpKm.toInt().toString())
+                    }
+                    OutlinedTextField(
+                        value = jumpText,
+                        onValueChange = { v ->
+                            jumpText = v
+                            v.toDoubleOrNull()?.let { if (it >= 0) onSetMaxJump(it) }
+                        },
+                        label = { Text("異常跳躍門檻 (km，0 = 不過濾)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
