@@ -489,20 +489,21 @@ object RealmBinaryParser {
 
     /**
      * Derive per-route coordinate index ranges directly from the DB structure.
-     * Returns [IntRange] (idFirst..idLast inclusive) for each route.  Used only for
-     * display / segment-count purposes; [findRouteSegmentIndices] should be preferred
+     * Returns an IntRange (idFirst..idLast inclusive) for each route.  Used only for
+     * display / segment-count purposes; findRouteSegmentIndices should be preferred
      * for any calculation that needs accurate per-route coordinates.
      */
-    fun findRouteSegments(data: ByteArray): List<IntRange>? =
-        findRouteSegmentIndices(data)?.map { idxList ->
-            if (idxList.isEmpty()) 0..(-1)
+    fun findRouteSegments(data: ByteArray): List<IntRange>? {
+        return findRouteSegmentIndices(data)?.map { idxList ->
+            if (idxList.isEmpty()) IntRange.EMPTY
             else idxList.first()..idxList.last()
         }
+    }
 
     /**
      * Derive the exact flat-array positions belonging to each route segment.
      *
-     * Unlike [findRouteSegments] which returns [idFirst..idLast] (an inclusive range
+     * Unlike findRouteSegments which returns idFirst..idLast (an inclusive range
      * that may contain foreign coordinates from interleaved routes), this function
      * returns only the positions where the coordinate actually belongs to that route.
      *
