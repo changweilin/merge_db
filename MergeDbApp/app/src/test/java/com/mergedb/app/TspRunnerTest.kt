@@ -83,6 +83,103 @@ class TspRunnerTest {
                     .format(i, sl.size, sl.min(), sl.max(), so.min(), so.max()))
             }
 
+            // ── Route-ID adjacency analysis ──────────────────────────────────
+            println()
+            println("--- 空 UUID 與大跳躍路線關聯分析 ---")
+            val ridLeaves = bTreeInfo.routeIdLeaves
+            if (ridLeaves == null) {
+                println("  (Strategy 2，無路線 ID 欄可分析)")
+            } else {
+                val ids = RealmBinaryParser.readIntLeafValues(data, ridLeaves)
+                if (ids.size != pairs) {
+                    println("  ⚠ ID 數 (${ids.size}) ≠ pairs ($pairs)，略過")
+                } else {
+                    // 重建 segIdx → routeId 對映，與 findRouteSegments Strategy 1 邏輯相同
+                    val idOrder2   = mutableListOf<Long>()
+                    val idFirstMap = linkedMapOf<Long, Int>()
+                    val idLastMap  = linkedMapOf<Long, Int>()
+                    val idCount    = linkedMapOf<Long, Int>()
+                    for (i in ids.indices) {
+                        val id = ids[i]
+                        if (!idFirstMap.containsKey(id)) { idOrder2.add(id); idFirstMap[id] = i }
+                        idLastMap[id] = i
+                        idCount[id] = (idCount[id] ?: 0) + 1
+                    }
+
+                    // 找出大跳躍段索引（同前）
+                    val largeJumpIdx = mutableSetOf<Int>()
+                    segments?.forEachIndexed { si, r ->
+                        val idx2 = (r.first..r.last).filter { it < pairs }
+                        if (idx2.isEmpty()) return@forEachIndexed
+                        val pts = idx2.map { LatLon(lats[it], lons[it]) }
+                        if (TspEngine.maxConsecutiveJump(pts) / 1000.0 > 500.0) largeJumpIdx.add(si)
+                    }
+
+                    if (largeJumpIdx.isEmpty()) {
+                        println("  無大跳躍路線 (所有相鄰跳躍 ≤ 500 km)")
+                    } else {
+                        for (si in largeJumpIdx.sorted()) {
+                            val routeId = idOrder2.getOrNull(si) ?: continue
+                            val rangeSize = (idLastMap[routeId] ?: 0) - (idFirstMap[routeId] ?: 0) + 1
+                            val actualCount = idCount[routeId] ?: 0
+                            val foreignCount = rangeSize - actualCount
+
+                            println()
+                            println("  大跳躍段 [%3d]  routeId=%-6d  range=%d..%d  range大小=%d  實際自身點=%d  外來點=%d"
+                                .format(si, routeId,
+                                    idFirstMap[routeId] ?: -1, idLastMap[routeId] ?: -1,
+                                    rangeSize, actualCount, foreignCount))
+
+                            // 外來點屬於哪些路線？
+                            if (foreignCount > 0) {
+                                val r = segments?.getOrNull(si) ?: continue
+                                val foreignIds = (r.first..r.last)
+                                    .filter { it < pairs && ids[it] != routeId }
+                                    .map { ids[it] }
+                                    .groupingBy { it }.eachCount()
+                                    .entries.sortedByDescending { it.value }
+                                    .take(5)
+                                print("    外來 ID：")
+                                for ((fid, cnt) in foreignIds) {
+                                    val fidSegIdx = idOrder2.indexOf(fid)
+                                    print(" id=$fid(段[$fidSegIdx], ${cnt}點)")
+                                }
+                                println()
+                            }
+
+                            // 印出 ±2 鄰段資訊
+                            for (neighbor in (si - 2)..(si + 2)) {
+                                val nr = segments?.getOrNull(neighbor) ?: continue
+                                val nid = idOrder2.getOrNull(neighbor) ?: continue
+                                val nIdx = (nr.first..nr.last).filter { it < pairs }
+                                if (nIdx.isEmpty()) { println("    [%3d] 空段".format(neighbor)); continue }
+                                val nPts = nIdx.map { LatLon(lats[it], lons[it]) }
+                                val nJump = TspEngine.maxConsecutiveJump(nPts) / 1000.0
+                                val nRange = (idLastMap[nid] ?: 0) - (idFirstMap[nid] ?: 0) + 1
+                                val nActual = idCount[nid] ?: 0
+                                val marker = if (neighbor == si) ">>>" else "   "
+                                println("  $marker [%3d] %4d pts  foreign=%d  maxJump=%.0f km"
+                                    .format(neighbor, nIdx.size, nRange - nActual, nJump))
+                            }
+                        }
+                    }
+
+                    // UUID vs segment 差異摘要
+                    val diff = uuidCount - (segments?.size ?: 0)
+                    if (diff != 0) {
+                        println()
+                        val totalForeign = largeJumpIdx.sumOf { si ->
+                            val rid = idOrder2.getOrNull(si) ?: return@sumOf 0
+                            val rangeSize2 = (idLastMap[rid] ?: 0) - (idFirstMap[rid] ?: 0) + 1
+                            rangeSize2 - (idCount[rid] ?: rangeSize2)
+                        }
+                        println("  UUID 超出 segment 數 $diff 個")
+                        println("  大跳躍段中「外來座標」合計: $totalForeign 點")
+                        println("  → ${if (totalForeign > 0) "外來座標可能來自空 UUID 路線（成因相同）" else "與空 UUID 無直接關聯（獨立問題）"}")
+                    }
+                }
+            }
+
             // ── DB structure probe (why route-ID column may not be found) ────
             println()
             println("--- DB Structure ---")
