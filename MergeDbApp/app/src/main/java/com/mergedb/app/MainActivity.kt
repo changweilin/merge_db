@@ -33,8 +33,16 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { tspVm.loadFile(it, this) } }
 
+    private val tspGpxPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { tspVm.loadGpxFile(it, this) } }
+
     private val tspOutputLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri -> uri?.let { tspVm.exportResult(it, this) } }
+
+    private val tspGpxOutputLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/gpx+xml")
     ) { uri -> uri?.let { tspVm.exportResult(it, this) } }
 
     private lateinit var mergeVm: MainViewModel
@@ -57,6 +65,7 @@ class MainActivity : ComponentActivity() {
 
                 val tspState by tspVm.state.collectAsState()
                 val tspConfig by tspVm.config.collectAsState()
+                val tspIsGpx by tspVm.inputIsGpx.collectAsState()
                 val applyTspOnMerge by mergeVm.applyTspOnMerge.collectAsState()
 
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -87,7 +96,9 @@ class MainActivity : ComponentActivity() {
                         1 -> TspScreen(
                             state = tspState,
                             config = tspConfig,
+                            isGpxInput = tspIsGpx,
                             onSelectFile = { tspFilePickerLauncher.launch(arrayOf("*/*")) },
+                            onSelectGpxFile = { tspGpxPickerLauncher.launch(arrayOf("*/*", "application/gpx+xml")) },
                             onSetStrategy = { tspVm.setStrategy(it) },
                             onSetOptimizer = { tspVm.setOptimizer(it) },
                             onSetSkipThreshold = { tspVm.setSkipLargeThreshold(it) },
@@ -96,10 +107,9 @@ class MainActivity : ComponentActivity() {
                             onSetMaxJump = { tspVm.setMaxConsecutiveJumpKm(it) },
                             onRunOptimize = { tspVm.runOptimize() },
                             onExport = {
-                                val tspFileName = (tspState as? com.mergedb.app.tsp.TspState.Done)?.let {
-                                    "tsp_optimized.db"
-                                } ?: "tsp_optimized.db"
-                                tspOutputLauncher.launch(tspFileName)
+                                val fileName = tspVm.suggestedExportFileName()
+                                if (tspIsGpx) tspGpxOutputLauncher.launch(fileName)
+                                else tspOutputLauncher.launch(fileName)
                             },
                             onReset = { tspVm.reset() },
                             onDismissError = { tspVm.dismissError() },

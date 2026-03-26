@@ -20,7 +20,9 @@ import com.mergedb.app.tsp.TspState
 fun TspScreen(
     state: TspState,
     config: TspConfig,
+    isGpxInput: Boolean,
     onSelectFile: () -> Unit,
+    onSelectGpxFile: () -> Unit,
     onSetStrategy: (TspStrategy) -> Unit,
     onSetOptimizer: (TspOptimizer) -> Unit,
     onSetSkipThreshold: (Int) -> Unit,
@@ -57,16 +59,22 @@ fun TspScreen(
             // ── File selection ────────────────────────────────────────────────
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
+                    Text("選擇輸入檔案", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("選擇 .db 檔案", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         OutlinedButton(
                             onClick = onSelectFile,
-                            enabled = state !is TspState.Loading && state !is TspState.Optimizing
-                        ) { Text("選擇檔案") }
+                            enabled = state !is TspState.Loading && state !is TspState.Optimizing,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("選擇 .db 檔案") }
+                        OutlinedButton(
+                            onClick = onSelectGpxFile,
+                            enabled = state !is TspState.Loading && state !is TspState.Optimizing,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("選擇 .gpx 軌跡") }
                     }
 
                     when (state) {
@@ -86,6 +94,11 @@ fun TspScreen(
                                 onClick = onAnalyzeStructure,
                                 modifier = Modifier.fillMaxWidth()
                             ) { Text("分析 DB 結構") }
+                        }
+                        is TspState.GpxReady -> {
+                            Spacer(Modifier.height(8.dp))
+                            Text("GPX 檔案: ${state.fileName}")
+                            Text("座標點: ${state.pointCount} 點")
                         }
                         is TspState.Optimizing -> {
                             Spacer(Modifier.height(8.dp))
@@ -170,39 +183,41 @@ fun TspScreen(
                     Text("參數設定", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(12.dp))
 
-                    // Skip large routes
-                    var skipText by remember(config.skipLargeThreshold) {
-                        mutableStateOf(config.skipLargeThreshold.toString())
+                    // Skip large routes (only relevant for .db input)
+                    if (!isGpxInput) {
+                        var skipText by remember(config.skipLargeThreshold) {
+                            mutableStateOf(config.skipLargeThreshold.toString())
+                        }
+                        OutlinedTextField(
+                            value = skipText,
+                            onValueChange = { v ->
+                                skipText = v
+                                v.toIntOrNull()?.let { if (it > 0) onSetSkipThreshold(it) }
+                            },
+                            label = { Text("略過大型路線 (點數上限)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(12.dp))
+
+                        // Max consecutive jump filter
+                        var jumpText by remember(config.maxConsecutiveJumpKm) {
+                            mutableStateOf(config.maxConsecutiveJumpKm.toInt().toString())
+                        }
+                        OutlinedTextField(
+                            value = jumpText,
+                            onValueChange = { v ->
+                                jumpText = v
+                                v.toDoubleOrNull()?.let { if (it >= 0) onSetMaxJump(it) }
+                            },
+                            label = { Text("異常跳躍門檻 (km，0 = 不過濾)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(12.dp))
                     }
-                    OutlinedTextField(
-                        value = skipText,
-                        onValueChange = { v ->
-                            skipText = v
-                            v.toIntOrNull()?.let { if (it > 0) onSetSkipThreshold(it) }
-                        },
-                        label = { Text("略過大型路線 (點數上限)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(Modifier.height(12.dp))
-
-                    // Max consecutive jump filter
-                    var jumpText by remember(config.maxConsecutiveJumpKm) {
-                        mutableStateOf(config.maxConsecutiveJumpKm.toInt().toString())
-                    }
-                    OutlinedTextField(
-                        value = jumpText,
-                        onValueChange = { v ->
-                            jumpText = v
-                            v.toDoubleOrNull()?.let { if (it >= 0) onSetMaxJump(it) }
-                        },
-                        label = { Text("異常跳躍門檻 (km，0 = 不過濾)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(Modifier.height(12.dp))
 
                     // Improvement threshold slider
                     val impPct = config.improvementThreshold.toFloat()
@@ -241,7 +256,7 @@ fun TspScreen(
             }
 
             // ── Action buttons ────────────────────────────────────────────────
-            val canRun = state is TspState.Ready || state is TspState.Done
+            val canRun = state is TspState.Ready || state is TspState.GpxReady || state is TspState.Done
             Button(
                 onClick = onRunOptimize,
                 enabled = canRun,
@@ -255,7 +270,8 @@ fun TspScreen(
                     onClick = onExport,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("匯出優化後 .db", style = MaterialTheme.typography.titleMedium)
+                    val exportLabel = if (isGpxInput) "匯出優化後 .gpx" else "匯出優化後 .db"
+                    Text(exportLabel, style = MaterialTheme.typography.titleMedium)
                 }
             }
 

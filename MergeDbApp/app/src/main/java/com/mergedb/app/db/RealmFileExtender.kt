@@ -123,7 +123,49 @@ object RealmFileExtender {
         val outBuf = ByteBuffer.wrap(workingData).order(ByteOrder.LITTLE_ENDIAN)
         writeToLeaves(outBuf, activeLatLeaves, combinedLat)
         writeToLeaves(outBuf, activeLonLeaves, combinedLon)
-        val finalData = mergeUuids(workingData, hostInfo, guestInfo)
+        var finalData = mergeUuids(workingData, hostInfo, guestInfo)
+
+        // ── 5. Extend route-ID column so Strategy-1 stays active post-merge ──
+        // Without this, findCoordinateBTreeInfo sees ids.size != pairs (old host
+        // count vs. new combined count) and falls back to Strategy-2 gap detection,
+        // which finds spurious segment boundaries inside the original files.
+        val routeIdLeaves   = bTreeInfo.routeIdLeaves
+        val routeIdColIdx   = bTreeInfo.routeIdColIndexIn46
+        val guestBTreeInfo  = RealmBinaryParser.findCoordinateBTreeInfo(guestData)
+        val guestIdLeaves   = guestBTreeInfo?.routeIdLeaves
+
+        if (routeIdLeaves != null && routeIdColIdx != null && guestIdLeaves != null) {
+            val hostIds  = RealmBinaryParser.readIntLeafValues(hostData, routeIdLeaves)
+            val guestIds = RealmBinaryParser.readIntLeafValues(guestData, guestIdLeaves)
+                .take(guestPairs)
+
+            if (hostIds.isNotEmpty() && guestIds.isNotEmpty()) {
+                // Remap guest IDs to be disjoint from host IDs.
+                val maxHostId      = hostIds.maxOrNull() ?: 0L
+                val uniqueGuestIds = guestIds.distinct()
+                val guestIdRemap   = uniqueGuestIds.withIndex()
+                    .associate { (i, id) -> id to (maxHostId + 1 + i) }
+                // The gap sentinel gets its own unique ID so it forms a trivial
+                // 1-point segment; TSP skips it (≤ 2 points).
+                val gapId = maxHostId + uniqueGuestIds.size + 1L
+
+                // IDs to append after the existing host leaves:  gap + guest
+                val newIds = buildList<Long> {
+                    add(gapId)
+                    guestIds.forEach { id -> add(guestIdRemap.getValue(id)) }
+                }
+
+                val leafTypeByte = routeIdLeaves.last().type.toInt() and 0xFF
+                finalData = extendRouteIdColumn(
+                    data               = finalData,
+                    node46Offset       = bTreeInfo.node46Offset,
+                    routeIdColIndexIn46 = routeIdColIdx,
+                    existingLeaves     = routeIdLeaves,
+                    newIds             = newIds,
+                    leafTypeByte       = leafTypeByte
+                )
+            }
+        }
 
         return ExtendResult(
             data             = finalData,
@@ -445,5 +487,80 @@ object RealmFileExtender {
         // (the existing C5 keeps its old UUID ref; truncation occurs but no crash)
 
         return extended2
+    }
+
+    // ── Route-ID column extension ─────────────────────────────────────────────
+
+    /**
+     * Append new integer leaf nodes to [data] for the [newIds], build a new C6
+     * B-Tree root covering both existing and new leaves, and patch the 0x46 entry
+     * at [routeIdColIndexIn46] to reference the new root.
+     *
+     * The existing leaves are left in place (their data is already correct for the
+     * host file).  We only need to cover the additional gap + guest ID entries.
+     */
+    private fun extendRouteIdColumn(
+        data: ByteArray,
+        node46Offset: Int,
+        routeIdColIndexIn46: Int,
+        existingLeaves: List<RealmNode.IntLeaf>,
+        newIds: List<Long>,
+        leafTypeByte: Int
+    ): ByteArray {
+        if (newIds.isEmpty()) return data
+
+        val extension = ByteArrayOutputStream()
+        var nextOffset = data.size
+        val newLeafOffsets = mutableListOf<Int>()
+
+        // Write new int leaf nodes (BPE=4, Int32-LE) for gap + guest IDs
+        var remaining = newIds
+        while (remaining.isNotEmpty()) {
+            val chunk = remaining.take(MAX_VALUES_PER_LEAF)
+            remaining = remaining.drop(MAX_VALUES_PER_LEAF)
+            newLeafOffsets.add(nextOffset)
+            val node = buildIntLeafNode(chunk, leafTypeByte, bpe = 4)
+            extension.write(node)
+            nextOffset += node.size
+        }
+
+        // New C6 root: old leaf offsets + new leaf offsets (with sentinels)
+        val allLeafOffsets = existingLeaves.map { it.offset } + newLeafOffsets
+        val newC6Offset = nextOffset
+        val c6Node = buildC6Root(allLeafOffsets)
+        extension.write(c6Node)
+
+        val extended = data + extension.toByteArray()
+
+        // Patch 0x46 entry for the route-ID column
+        val patchBuf = ByteBuffer.wrap(extended).order(ByteOrder.LITTLE_ENDIAN)
+        patchBuf.putInt(node46Offset + 8 + routeIdColIndexIn46 * 4, newC6Offset)
+
+        return extended
+    }
+
+    /**
+     * Build an integer leaf node with the given [typeByte] and [bpe] (bytes per entry).
+     * Values are written as little-endian integers of size [bpe].
+     *
+     * Layout: [AAAA][typeByte][count: 3-byte BE][values: count × bpe-byte LE][0x00 padding]
+     */
+    private fun buildIntLeafNode(values: List<Long>, typeByte: Int, bpe: Int): ByteArray {
+        val count = values.size
+        val rawSize = 8 + count * bpe
+        val alignedSize = alignUp8(rawSize)
+        val bytes = ByteArray(alignedSize)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        writeNodeHeader(bytes, typeByte, count)
+        values.forEachIndexed { i, v ->
+            val pos = 8 + i * bpe
+            when (bpe) {
+                1    -> bytes[pos] = v.toByte()
+                2    -> buf.putShort(pos, v.toShort())
+                4    -> buf.putInt(pos, v.toInt())
+                else -> buf.putLong(pos, v)
+            }
+        }
+        return bytes
     }
 }

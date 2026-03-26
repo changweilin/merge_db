@@ -547,4 +547,65 @@ object TspEngine {
             skippedRoutes = skippedCount
         )
     }
+
+    // ── GPX / flat-list optimisation ─────────────────────────────────────────
+
+    /**
+     * Run TSP on a plain list of coordinates (e.g. from a .gpx file).
+     * Treats all [points] as a single route segment and returns a [TspResult]
+     * with the reordered coordinates.
+     */
+    fun optimizePoints(
+        points: List<LatLon>,
+        config: TspConfig,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): TspResult {
+        onProgress(0, 1)
+        if (points.size <= 2) {
+            onProgress(1, 1)
+            return TspResult(
+                reorderedLats = points.map { it.lat },
+                reorderedLons = points.map { it.lon },
+                routeResults = listOf(TspRouteResult(0, 0.0, 0.0, false, false, "點數 ≤ 2，略過")),
+                totalRoutes = 1,
+                improvedRoutes = 0,
+                skippedRoutes = 0
+            )
+        }
+        val dist = buildDistMatrix(points)
+        val identity = IntArray(points.size) { it }
+        val origLen = tourLength(points, identity, dist)
+        val order = solve(points, config, isCancelled)
+        val newLen = tourLength(points, order, dist)
+        val improvement = if (origLen > 0) (origLen - newLen) / origLen * 100 else 0.0
+        val apply = improvement >= config.improvementThreshold
+        val actuallyImproved = apply && newLen < origLen
+
+        val reorderedLats: List<Double>
+        val reorderedLons: List<Double>
+        if (actuallyImproved) {
+            reorderedLats = order.map { points[it].lat }
+            reorderedLons = order.map { points[it].lon }
+        } else {
+            reorderedLats = points.map { it.lat }
+            reorderedLons = points.map { it.lon }
+        }
+
+        val reason = if (!apply)
+            "改善幅度 %.1f%% < 門檻 %.1f%%".format(improvement, config.improvementThreshold)
+        else ""
+
+        onProgress(1, 1)
+        return TspResult(
+            reorderedLats = reorderedLats,
+            reorderedLons = reorderedLons,
+            routeResults = listOf(
+                TspRouteResult(0, origLen, newLen, actuallyImproved, false, reason)
+            ),
+            totalRoutes = 1,
+            improvedRoutes = if (actuallyImproved) 1 else 0,
+            skippedRoutes = 0
+        )
+    }
 }

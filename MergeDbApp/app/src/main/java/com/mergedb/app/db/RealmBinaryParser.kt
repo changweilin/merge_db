@@ -321,7 +321,9 @@ object RealmBinaryParser {
         val lonColIndexIn46: Int,     // which entry (0-3) in 0x46 points to the lon B-Tree root
         val latLeaves: List<RealmNode.Float64Leaf>,
         val lonLeaves: List<RealmNode.Float64Leaf>,
-        val routeIdLeaves: List<RealmNode.IntLeaf>? = null
+        val routeIdLeaves: List<RealmNode.IntLeaf>? = null,
+        /** Which entry in the 0x46 node points to the route-ID B-Tree root. Null when absent. */
+        val routeIdColIndexIn46: Int? = null
     )
 
     /**
@@ -427,6 +429,7 @@ object RealmBinaryParser {
             // Try to find a non-Float64 column in the same table with the same total
             // entry count as lat — this is the route-ID / object-link column.
             val coordEntryCount = latLeaves.sumOf { it.count }
+            var routeIdColIndexIn46: Int? = null
             val routeIdLeaves: List<RealmNode.IntLeaf>? = run {
                 for ((colIdx, childOffset) in children.withIndex()) {
                     if (colIdx == latColIdx || colIdx == lonColIdx) continue
@@ -446,6 +449,7 @@ object RealmBinaryParser {
                     if (bpe.isEmpty() || bpe.any { it !in validBpe }) continue
                     // Assign inferred bpe to leaves whose bpe was measured as 0
                     val fallbackBpe = bpe.min()   // prefer the smallest observed bpe
+                    routeIdColIndexIn46 = colIdx
                     return@run rawLeaves.map { l ->
                         val effectiveBpe = if (l.bytesPerEntry in validBpe) l.bytesPerEntry else fallbackBpe
                         RealmNode.IntLeaf(l.offset, l.typeByte.toByte(), l.count,
@@ -461,7 +465,8 @@ object RealmBinaryParser {
                 lonColIndexIn46 = lonColIdx,
                 latLeaves = latLeaves,
                 lonLeaves = lonLeaves,
-                routeIdLeaves = routeIdLeaves
+                routeIdLeaves = routeIdLeaves,
+                routeIdColIndexIn46 = routeIdColIndexIn46
             )
         }
         return null

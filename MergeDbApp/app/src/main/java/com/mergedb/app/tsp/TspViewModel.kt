@@ -18,6 +18,7 @@ sealed class TspState {
     data object Idle : TspState()
     data class Loading(val fileName: String) : TspState()
     data class Ready(val info: DbFileInfo, val routeCount: Int, val totalPoints: Int) : TspState()
+    data class GpxReady(val fileName: String, val pointCount: Int) : TspState()
     data class Optimizing(val current: Int, val total: Int) : TspState()
     data class Done(val result: TspResult) : TspState()
     data class Error(val message: String) : TspState()
@@ -32,7 +33,13 @@ class TspViewModel : ViewModel() {
     private val _config = MutableStateFlow(TspConfig())
     val config: StateFlow<TspConfig> = _config
 
+    private val _inputIsGpx = MutableStateFlow(false)
+    val inputIsGpx: StateFlow<Boolean> = _inputIsGpx
+
     private var fileData: ByteArray? = null
+    private var gpxPoints: List<LatLon>? = null
+    private var gpxTrackName: String = "TSP Track"
+    private var inputBaseName: String = ""
     private var optimizeJob: Job? = null
 
     // ── Config updates ────────────────────────────────────────────────────────
@@ -74,9 +81,11 @@ class TspViewModel : ViewModel() {
                     error("不是有效的 GPS Joystick .db 檔案 (缺少 T-DB 標頭)")
                 }
                 fileData = data
+                gpxPoints = null
+                inputBaseName = fileName.substringBeforeLast('.')
+                _inputIsGpx.value = false
 
                 val info = RealmBinaryParser.buildFileInfo(fileName, data)
-                // totalPoints: count of valid finite coordinate pairs
                 val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(data)
                 val pairs = if (bTreeInfo != null) {
                     fun readFinite(leaves: List<RealmNode.Float64Leaf>) = buildList<Double> {
@@ -101,9 +110,41 @@ class TspViewModel : ViewModel() {
         }
     }
 
+    fun loadGpxFile(uri: Uri, context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val fileName = getFileName(uri, context) ?: "track.gpx"
+            _state.value = TspState.Loading(fileName)
+            try {
+                val data = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("無法讀取檔案")
+                val track = GpxParser.parse(data)
+                if (track.points.isEmpty()) error("GPX 檔案中無座標點")
+                gpxPoints = track.points
+                gpxTrackName = track.name ?: fileName.substringBeforeLast('.')
+                inputBaseName = fileName.substringBeforeLast('.')
+                _inputIsGpx.value = true
+                fileData = null
+
+                _state.value = TspState.GpxReady(fileName, track.points.size)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.value = TspState.Error("載入失敗: ${e.message}")
+            }
+        }
+    }
+
     // ── Optimisation ──────────────────────────────────────────────────────────
 
     fun runOptimize() {
+        if (_inputIsGpx.value) {
+            runGpxOptimize()
+        } else {
+            runDbOptimize()
+        }
+    }
+
+    private fun runDbOptimize() {
         val data = fileData ?: return
         optimizeJob?.cancel()
         optimizeJob = viewModelScope.launch(Dispatchers.Default) {
@@ -126,12 +167,39 @@ class TspViewModel : ViewModel() {
         }
     }
 
+    private fun runGpxOptimize() {
+        val points = gpxPoints ?: return
+        optimizeJob?.cancel()
+        optimizeJob = viewModelScope.launch(Dispatchers.Default) {
+            _state.value = TspState.Optimizing(0, 1)
+            try {
+                val result = TspEngine.optimizePoints(
+                    points = points,
+                    config = _config.value,
+                    isCancelled = { !isActive },
+                    onProgress = { done, total ->
+                        _state.value = TspState.Optimizing(done, total)
+                    }
+                )
+                _state.value = TspState.Done(result)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.value = TspState.Error("優化失敗: ${e.message}")
+            }
+        }
+    }
+
     // ── Export ────────────────────────────────────────────────────────────────
 
     fun exportResult(outputUri: Uri, context: Context) {
+        if (_inputIsGpx.value) exportGpxResult(outputUri, context)
+        else exportDbResult(outputUri, context)
+    }
+
+    private fun exportDbResult(outputUri: Uri, context: Context) {
         val data = fileData ?: return
         val result = (_state.value as? TspState.Done)?.result ?: return
-
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val rewritten = RealmFileExtender.rewriteCoordinates(
@@ -149,9 +217,53 @@ class TspViewModel : ViewModel() {
         }
     }
 
+    private fun exportGpxResult(outputUri: Uri, context: Context) {
+        val result = (_state.value as? TspState.Done)?.result ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val optimizedPoints = result.reorderedLats.zip(result.reorderedLons)
+                    .map { (lat, lon) -> LatLon(lat, lon) }
+                val gpxBytes = GpxParser.export(optimizedPoints, gpxTrackName)
+                context.contentResolver.openOutputStream(outputUri)?.use { it.write(gpxBytes) }
+                    ?: error("無法寫入輸出檔案")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.value = TspState.Error("匯出失敗: ${e.message}")
+            }
+        }
+    }
+
+    // ── Filename suggestion ───────────────────────────────────────────────────
+
+    /** Build a suggested export filename reflecting the algorithm and key parameters. */
+    fun suggestedExportFileName(): String {
+        val cfg = _config.value
+        val strategyKey = when (cfg.strategy) {
+            TspStrategy.NEAREST_NEIGHBOR -> "nn"
+            TspStrategy.GREEDY           -> "gr"
+            TspStrategy.INSERTION        -> "ins"
+        }
+        val optimizerKey = when (cfg.optimizer) {
+            TspOptimizer.NONE  -> "none"
+            TspOptimizer.OPT_2 -> "2opt"
+            TspOptimizer.LK    -> "lk"
+            TspOptimizer.SA    -> "sa"
+            TspOptimizer.GA    -> "ga"
+        }
+        val skip = cfg.skipLargeThreshold
+        val jump = cfg.maxConsecutiveJumpKm.toInt()
+        val base = inputBaseName.ifEmpty { "tsp" }
+        val ext  = if (_inputIsGpx.value) "gpx" else "db"
+        return "${base}_tsp_${strategyKey}_${optimizerKey}_s${skip}_j${jump}.${ext}"
+    }
+
     fun reset() {
         optimizeJob?.cancel()
         fileData = null
+        gpxPoints = null
+        inputBaseName = ""
+        _inputIsGpx.value = false
         _state.value = TspState.Idle
     }
 
