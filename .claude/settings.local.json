@@ -2,7 +2,25 @@
   "permissions": {
     "allow": [
       "Bash(xxd:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(wc:*)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(cmd.exe /c \"gradlew.bat assembleDebug 2>&1\")",
+      "Bash(powershell.exe -Command \".\\\\gradlew.bat assembleDebug\")",
+      "mcp__ide__getDiagnostics",
+      "Bash(chmod:*)",
+      "Bash(mkdir -p ~/.claude/channels/discord)",
+      "Read(//c/Users/user/.claude/channels/discord/**)",
+      "Skill(discord:configure)",
+      "Bash(find C:UsersuserDocumentsappmerge_db -maxdepth 3 -type f \\\\\\(-name README* -o -name *.md \\\\\\) -not -path */.*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep:*)",
+      "Bash(gradlew.bat assembleDebug)",
+      "Bash(cmd.exe /c \"gradlew.bat assembleDebug\")",
+      "Bash(adb shell:*)",
+      "Bash(adb devices:*)"
     ]
   }
 }
