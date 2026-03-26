@@ -134,8 +134,11 @@ class MainViewModel : ViewModel() {
                     extendResult.data
                 }
 
-                // Save directly — add timestamp if filename already exists
-                val outName = "merged_${hostInfo.fileName}"
+                // Always include timestamp so every merge output is uniquely named
+                val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                    .format(java.util.Date())
+                val base = hostInfo.fileName.substringBeforeLast('.')
+                val outName = "merged_${base}_${ts}.db"
                 val savedPath = FileHelper.save(outputData, outName, context)
 
                 _mergeState.value = MergeState.Success(validation, extendResult, tspResult, savedPath)
