@@ -268,26 +268,25 @@ object RealmBinaryParser {
     }
 
     fun readStrings(data: ByteArray, node: RealmNode.StringNode): List<String> {
-        val raw = data.copyOfRange(node.dataOffset, node.dataOffset + node.maxLength)
         val strings = mutableListOf<String>()
-        var start = 0
-        for (i in raw.indices) {
-            if (raw[i] == 0.toByte()) {
+        val base = node.dataOffset
+        val end = base + node.maxLength
+        var start = base
+        for (i in base until end) {
+            if (data[i] == 0.toByte()) {
                 if (i > start) {
-                    try {
-                        strings.add(String(raw, start, i - start, Charsets.UTF_8))
-                    } catch (_: Exception) {}
+                    try { strings.add(String(data, start, i - start, Charsets.UTF_8)) }
+                    catch (_: Exception) {}
                 }
                 start = i + 1
             }
         }
-        if (start < raw.size) {
-            val remaining = raw.copyOfRange(start, raw.size)
-            val trimmed = remaining.takeWhile { it != 0.toByte() }.toByteArray()
-            if (trimmed.isNotEmpty()) {
-                try {
-                    strings.add(String(trimmed, Charsets.UTF_8))
-                } catch (_: Exception) {}
+        if (start < end) {
+            var len = end - start
+            while (len > 0 && data[start + len - 1] == 0.toByte()) len--
+            if (len > 0) {
+                try { strings.add(String(data, start, len, Charsets.UTF_8)) }
+                catch (_: Exception) {}
             }
         }
         return strings

@@ -258,11 +258,14 @@ object TspEngine {
         val p1 = 1 + rng.nextInt(n / 4)
         val p2 = p1 + 1 + rng.nextInt(n / 4)
         val p3 = p2 + 1 + rng.nextInt(n / 4)
-        val a = tour.slice(0 until p1)
-        val b = tour.slice(p1 until p2)
-        val c = tour.slice(p2 until p3)
-        val d = tour.slice(p3 until n)
-        return (a + c + b + d).toIntArray()
+        // Reconnect as A+C+B+D without any List allocations
+        val result = IntArray(n)
+        var pos = 0
+        for (i in 0 until p1)  result[pos++] = tour[i]
+        for (i in p2 until p3) result[pos++] = tour[i]
+        for (i in p1 until p2) result[pos++] = tour[i]
+        for (i in p3 until n)  result[pos++] = tour[i]
+        return result
     }
 
     /** Lin-Kernighan with 50 Double-Bridge perturbations. */
@@ -382,25 +385,32 @@ object TspEngine {
         }
 
         val deadline = System.currentTimeMillis() + timeoutMs
-        var scored = population.sortedByDescending { fitness(it) }.toMutableList()
+
+        // Use a plain Array and sort in place to avoid repeated List/wrapper allocations
+        var pool = Array(popSize) { population[it] }
+        pool.sortWith(compareByDescending { fitness(it) })
 
         for (gen in 0 until generations) {
             if (System.currentTimeMillis() > deadline || isCancelled()) break
-            val next = mutableListOf(scored[0].copyOf(), scored[1].copyOf()) // elitism
-            while (next.size < popSize) {
+            val next = Array(popSize) { pool[0] } // filled below; index 0/1 = elitism
+            next[0] = pool[0].copyOf()
+            next[1] = pool[1].copyOf()
+            var idx = 2
+            while (idx < popSize) {
                 // Tournament selection with cubic bias
-                val p1 = scored[(rng.nextDouble().pow(3) * popSize).toInt().coerceAtMost(popSize - 1)]
-                val p2 = scored[(rng.nextDouble().pow(3) * popSize).toInt().coerceAtMost(popSize - 1)]
+                val p1 = pool[(rng.nextDouble().pow(3) * popSize).toInt().coerceAtMost(popSize - 1)]
+                val p2 = pool[(rng.nextDouble().pow(3) * popSize).toInt().coerceAtMost(popSize - 1)]
                 var child = crossover(p1, p2)
                 if (rng.nextDouble() < mutationRate) {
                     val i = rng.nextInt(n); val j = rng.nextInt(n)
                     val tmp = child[i]; child[i] = child[j]; child[j] = tmp
                 }
-                next.add(child)
+                next[idx++] = child
             }
-            scored = next.sortedByDescending { fitness(it) }.toMutableList()
+            next.sortWith(compareByDescending { fitness(it) })
+            pool = next
         }
-        return scored[0]
+        return pool[0]
     }
 
     // ── Master solve ──────────────────────────────────────────────────────────

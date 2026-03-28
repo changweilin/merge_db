@@ -237,7 +237,7 @@ private fun AlgorithmCard(
             Text(description, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
 
-            // Animation box
+            // Animation box — only run infinite transition when card is expanded
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -247,7 +247,26 @@ private fun AlgorithmCard(
                         shape = RoundedCornerShape(8.dp)
                     )
             ) {
-                animation()
+                if (expanded) {
+                    animation()
+                } else {
+                    // Static first-frame placeholder: three dots connected by a line
+                    val dotColor = MaterialTheme.colorScheme.primary
+                    Canvas(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                        val w = size.width; val h = size.height
+                        val pts = listOf(
+                            Offset(w * 0.15f, h * 0.6f),
+                            Offset(w * 0.5f,  h * 0.25f),
+                            Offset(w * 0.85f, h * 0.6f)
+                        )
+                        drawLine(dotColor.copy(alpha = 0.4f), pts[0], pts[1], strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+                        drawLine(dotColor.copy(alpha = 0.4f), pts[1], pts[2], strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+                        pts.forEach { p ->
+                            drawCircle(Color.White, radius = 7.dp.toPx(), center = p)
+                            drawCircle(dotColor, radius = 5.dp.toPx(), center = p)
+                        }
+                    }
+                }
             }
 
             // Collapsible details
