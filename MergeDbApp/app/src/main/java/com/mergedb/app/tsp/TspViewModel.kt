@@ -44,6 +44,10 @@ class TspViewModel : ViewModel() {
 
     // ── Config updates ────────────────────────────────────────────────────────
 
+    fun applyPreset(preset: TspPreset) {
+        _config.value = preset.toConfig()
+    }
+
     fun setStrategy(strategy: TspStrategy) {
         _config.value = _config.value.copy(strategy = strategy)
     }

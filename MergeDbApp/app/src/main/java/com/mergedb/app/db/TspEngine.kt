@@ -32,6 +32,21 @@ data class TspConfig(
     val maxConsecutiveJumpKm: Double = 500.0
 )
 
+enum class TspPreset {
+    /** Nearest Neighbor + 2-Opt, large skip threshold, 1-minute timeout */
+    FAST,
+    /** Greedy + Lin-Kernighan, default skip threshold, 3-minute timeout */
+    BALANCED,
+    /** Insertion + Simulated Annealing, small skip threshold, 10-minute timeout */
+    THOROUGH;
+
+    fun toConfig(): TspConfig = when (this) {
+        FAST     -> TspConfig(TspStrategy.NEAREST_NEIGHBOR, TspOptimizer.OPT_2,  512, 0.0,  60_000L,  500.0)
+        BALANCED -> TspConfig(TspStrategy.GREEDY,           TspOptimizer.LK,     256, 0.5, 180_000L,  500.0)
+        THOROUGH -> TspConfig(TspStrategy.INSERTION,        TspOptimizer.SA,     128, 1.0, 600_000L,  500.0)
+    }
+}
+
 data class TspRouteResult(
     val index: Int,
     val originalLength: Double,

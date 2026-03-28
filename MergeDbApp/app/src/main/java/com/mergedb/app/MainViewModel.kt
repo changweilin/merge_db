@@ -22,7 +22,8 @@ sealed class MergeState {
         val validation: MergeValidator.ValidationResult,
         val extendResult: RealmFileExtender.ExtendResult,
         val tspResult: TspResult? = null,
-        val savedPath: String = ""
+        val savedPath: String = "",
+        val gpxPath: String = ""
     ) : MergeState()
     data class Error(val message: String) : MergeState()
 }
@@ -44,8 +45,15 @@ class MainViewModel : ViewModel() {
     private val _applyTspOnMerge = MutableStateFlow(false)
     val applyTspOnMerge: StateFlow<Boolean> = _applyTspOnMerge
 
+    private val _exportGpxOnMerge = MutableStateFlow(false)
+    val exportGpxOnMerge: StateFlow<Boolean> = _exportGpxOnMerge
+
     fun toggleApplyTspOnMerge() {
         _applyTspOnMerge.value = !_applyTspOnMerge.value
+    }
+
+    fun toggleExportGpxOnMerge() {
+        _exportGpxOnMerge.value = !_exportGpxOnMerge.value
     }
 
     private var fileAData: ByteArray? = null
@@ -141,7 +149,26 @@ class MainViewModel : ViewModel() {
                 val outName = "merged_${base}_${ts}.db"
                 val savedPath = FileHelper.save(outputData, outName, context)
 
-                _mergeState.value = MergeState.Success(validation, extendResult, tspResult, savedPath)
+                // Optionally export a GPX of the merged coordinates
+                var gpxPath = ""
+                if (_exportGpxOnMerge.value) {
+                    val bTreeInfo = RealmBinaryParser.findCoordinateBTreeInfo(outputData)
+                    if (bTreeInfo != null) {
+                        val lats = bTreeInfo.latLeaves.flatMap {
+                            RealmBinaryParser.readFloat64Values(outputData, it).filter { v -> v.isFinite() }
+                        }
+                        val lons = bTreeInfo.lonLeaves.flatMap {
+                            RealmBinaryParser.readFloat64Values(outputData, it).filter { v -> v.isFinite() }
+                        }
+                        val pts = lats.zip(lons).map { (lat, lon) -> LatLon(lat, lon) }
+                        if (pts.isNotEmpty()) {
+                            val gpxBytes = GpxParser.export(pts, base)
+                            gpxPath = FileHelper.save(gpxBytes, "merged_${base}_${ts}.gpx", context)
+                        }
+                    }
+                }
+
+                _mergeState.value = MergeState.Success(validation, extendResult, tspResult, savedPath, gpxPath)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

@@ -23,6 +23,7 @@ fun TspScreen(
     isGpxInput: Boolean,
     onSelectFile: () -> Unit,
     onSelectGpxFile: () -> Unit,
+    onApplyPreset: (TspPreset) -> Unit,
     onSetStrategy: (TspStrategy) -> Unit,
     onSetOptimizer: (TspOptimizer) -> Unit,
     onSetSkipThreshold: (Int) -> Unit,
@@ -144,6 +145,33 @@ fun TspScreen(
                             }
                         }
                         else -> {}
+                    }
+                }
+            }
+
+            // ── Parameter Presets ─────────────────────────────────────────────
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("快速預設", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val presets = listOf(
+                            TspPreset.FAST to "⚡ 快速",
+                            TspPreset.BALANCED to "⚖ 平衡",
+                            TspPreset.THOROUGH to "🔬 精確"
+                        )
+                        presets.forEach { (preset, label) ->
+                            FilterChip(
+                                selected = false,
+                                onClick = { onApplyPreset(preset) },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f),
+                                enabled = state !is TspState.Loading && state !is TspState.Optimizing
+                            )
+                        }
                     }
                 }
             }
@@ -353,6 +381,13 @@ fun TspScreen(
 
 @Composable
 private fun ResultCard(result: TspResult) {
+    // Compute aggregate stats
+    val improvedRoutes = result.routeResults.filter { it.improved }
+    val totalOrigKm = improvedRoutes.sumOf { it.originalLength } / 1000.0
+    val totalOptKm  = improvedRoutes.sumOf { it.optimizedLength } / 1000.0
+    val totalSavedKm = totalOrigKm - totalOptKm
+    val overallPct = if (totalOrigKm > 0) totalSavedKm / totalOrigKm * 100 else 0.0
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -366,9 +401,41 @@ private fun ResultCard(result: TspResult) {
                 fontWeight = FontWeight.Bold
             )
             Spacer(Modifier.height(8.dp))
-            Text("總路線: ${result.totalRoutes} 條")
-            Text("已改善: ${result.improvedRoutes} 條")
-            Text("已略過: ${result.skippedRoutes} 條")
+
+            // Summary row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("總路線", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f))
+                    Text("${result.totalRoutes} 條", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("已改善", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f))
+                    Text("${result.improvedRoutes} 條", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("已略過", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f))
+                    Text("${result.skippedRoutes} 條", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (totalSavedKm > 0) {
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.2f))
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "總節省距離：%.2f km  (%.1f%% 改善)".format(totalSavedKm, overallPct),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "改善路線合計：%.2f km → %.2f km".format(totalOrigKm, totalOptKm),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
             Spacer(Modifier.height(8.dp))
 
             result.routeResults.forEach { r ->

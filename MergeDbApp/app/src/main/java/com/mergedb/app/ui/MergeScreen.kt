@@ -22,10 +22,12 @@ fun MergeScreen(
     mergeState: MergeState,
     mergeCheck: MergeEngine.MergeCheck?,
     applyTspOnMerge: Boolean,
+    exportGpxOnMerge: Boolean,
     onSelectFileA: () -> Unit,
     onSelectFileB: () -> Unit,
     onMerge: () -> Unit,
     onToggleApplyTsp: () -> Unit,
+    onToggleExportGpx: () -> Unit,
     onDismissError: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -132,6 +134,19 @@ fun MergeScreen(
                 )
                 Text("合併時計算 TSP")
             }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Checkbox(
+                    checked = exportGpxOnMerge,
+                    onCheckedChange = { onToggleExportGpx() },
+                    enabled = mergeState !is MergeState.Merging &&
+                            mergeState !is MergeState.ApplyingTsp &&
+                            mergeState !is MergeState.Parsing
+                )
+                Text("同時匯出合併後的 .gpx 檔")
+            }
 
             // Status display
             when (mergeState) {
@@ -167,6 +182,13 @@ fun MergeScreen(
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = "已儲存: ${mergeState.savedPath}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            if (mergeState.gpxPath.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "GPX: ${mergeState.gpxPath}",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }

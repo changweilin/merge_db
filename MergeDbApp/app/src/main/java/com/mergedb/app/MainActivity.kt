@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
                 val tspConfig by tspVm.config.collectAsState()
                 val tspIsGpx by tspVm.inputIsGpx.collectAsState()
                 val applyTspOnMerge by mergeVm.applyTspOnMerge.collectAsState()
+                val exportGpxOnMerge by mergeVm.exportGpxOnMerge.collectAsState()
 
                 Column(modifier = Modifier.fillMaxSize()) {
                     // ── Page content ──────────────────────────────────────────
@@ -66,6 +67,7 @@ class MainActivity : ComponentActivity() {
                             mergeState = mergeState,
                             mergeCheck = mergeCheck,
                             applyTspOnMerge = applyTspOnMerge,
+                            exportGpxOnMerge = exportGpxOnMerge,
                             onSelectFileA = {
                                 pendingFileSlot = 0
                                 mergeFilePickerLauncher.launch(arrayOf("*/*"))
@@ -76,6 +78,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onMerge = { mergeVm.onMerge(this@MainActivity) },
                             onToggleApplyTsp = { mergeVm.toggleApplyTspOnMerge() },
+                            onToggleExportGpx = { mergeVm.toggleExportGpxOnMerge() },
                             onDismissError = { mergeVm.resetState() },
                             modifier = Modifier.weight(1f)
                         )
@@ -85,6 +88,7 @@ class MainActivity : ComponentActivity() {
                             isGpxInput = tspIsGpx,
                             onSelectFile = { tspFilePickerLauncher.launch(arrayOf("*/*")) },
                             onSelectGpxFile = { tspGpxPickerLauncher.launch(arrayOf("*/*", "application/gpx+xml")) },
+                            onApplyPreset = { tspVm.applyPreset(it) },
                             onSetStrategy = { tspVm.setStrategy(it) },
                             onSetOptimizer = { tspVm.setOptimizer(it) },
                             onSetSkipThreshold = { tspVm.setSkipLargeThreshold(it) },
