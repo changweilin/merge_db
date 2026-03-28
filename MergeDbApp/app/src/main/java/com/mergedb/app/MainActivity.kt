@@ -13,6 +13,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mergedb.app.tsp.TspViewModel
 import com.mergedb.app.ui.MergeScreen
 import com.mergedb.app.ui.TspScreen
+import com.mergedb.app.ui.TutorialScreen
 import com.mergedb.app.ui.theme.MergeDbTheme
 
 class MainActivity : ComponentActivity() {
@@ -95,8 +96,10 @@ class MainActivity : ComponentActivity() {
                             onReset = { tspVm.reset() },
                             onDismissError = { tspVm.dismissError() },
                             onAnalyzeStructure = { tspVm.analyzeDbStructure() },
+                            onCancelOptimize = { tspVm.cancelOptimize() },
                             modifier = Modifier.weight(1f)
                         )
+                        2 -> TutorialScreen(modifier = Modifier.weight(1f))
                     }
 
                     // ── Bottom navigation ─────────────────────────────────────
@@ -112,6 +115,12 @@ class MainActivity : ComponentActivity() {
                             onClick = { selectedTab = 1 },
                             icon = { Text("✦") },
                             label = { Text("TSP 優化") }
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
+                            icon = { Text("📚") },
+                            label = { Text("演算法教學") }
                         )
                     }
                 }

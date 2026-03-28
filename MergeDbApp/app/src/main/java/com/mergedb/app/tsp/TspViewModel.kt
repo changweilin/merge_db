@@ -258,6 +258,11 @@ class TspViewModel : ViewModel() {
         return "${base}_tsp_${strategyKey}_${optimizerKey}_s${skip}_j${jump}.${ext}"
     }
 
+    fun cancelOptimize() {
+        optimizeJob?.cancel()
+        _state.value = TspState.Idle
+    }
+
     fun reset() {
         optimizeJob?.cancel()
         fileData = null

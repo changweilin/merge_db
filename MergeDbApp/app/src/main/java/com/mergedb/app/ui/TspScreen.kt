@@ -34,6 +34,7 @@ fun TspScreen(
     onReset: () -> Unit,
     onDismissError: () -> Unit,
     onAnalyzeStructure: () -> Unit,
+    onCancelOptimize: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Scaffold(
@@ -101,12 +102,35 @@ fun TspScreen(
                             Text("座標點: ${state.pointCount} 點")
                         }
                         is TspState.Optimizing -> {
+                            val pct = if (state.total > 0)
+                                (state.current.toFloat() / state.total * 100).toInt() else 0
                             Spacer(Modifier.height(8.dp))
-                            Text("優化中… 路線 ${state.current} / ${state.total}")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("優化中… 路線 ${state.current} / ${state.total}")
+                                Text(
+                                    text = "$pct%",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                             LinearProgressIndicator(
                                 progress = { if (state.total > 0) state.current.toFloat() / state.total else 0f },
                                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
                             )
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedButton(
+                                onClick = onCancelOptimize,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Text("⏹ 終止優化")
+                            }
                         }
                         is TspState.Done -> {
                             Spacer(Modifier.height(8.dp))
